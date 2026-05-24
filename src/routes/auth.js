@@ -10,7 +10,7 @@ const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
 function signToken(user) {
   return jwt.sign(
-    { id: user.id, username: user.username, email: user.email },
+    { id: user.id, username: user.username, email: user.email, role: user.role || 'member' },
     JWT_SECRET,
     { expiresIn: JWT_EXPIRES_IN }
   );
@@ -31,7 +31,7 @@ router.post('/register', async (req, res, next) => {
     const result = await pool.query(
       `INSERT INTO users (username, email, password_hash, bio, location)
        VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, username, email, bio, location, reliability_score, created_at`,
+       RETURNING id, username, email, role, bio, location, reliability_score, created_at`,
       [username.trim(), email.toLowerCase().trim(), hash, bio || null, location || null]
     );
     const user = result.rows[0];
@@ -54,7 +54,7 @@ router.post('/login', async (req, res, next) => {
     }
 
     const result = await pool.query(
-      `SELECT id, username, email, password_hash, bio, location, reliability_score, avatar_url, created_at
+      `SELECT id, username, email, role, password_hash, bio, location, reliability_score, avatar_url, created_at
        FROM users WHERE email = $1`,
       [email.toLowerCase().trim()]
     );
@@ -74,7 +74,7 @@ router.post('/login', async (req, res, next) => {
 router.get('/me', authenticate, async (req, res, next) => {
   try {
     const result = await pool.query(
-      `SELECT id, username, email, bio, location, reliability_score, avatar_url, created_at
+      `SELECT id, username, email, role, bio, location, reliability_score, avatar_url, created_at
        FROM users WHERE id = $1`,
       [req.user.id]
     );

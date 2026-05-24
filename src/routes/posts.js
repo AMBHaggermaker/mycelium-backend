@@ -18,6 +18,8 @@ const ALLOWED_MIME = new Set([
 
 const VALID_CATEGORIES = new Set(['jobs_services', 'goods_supplies', 'community']);
 
+const NSFW_PATTERN = /\b(porn(?:ography)?|xxx|nudes?|naked|onlyfans|escort|prostitut\w*|camgirl|stripper|penis|vagina|fuck\w*|pussy|cocks?|dicks?|tits?|boobs?|nipples?)\b/i;
+
 const mediaStorage = multer.diskStorage({
   destination: uploadDir,
   filename: (req, file, cb) => {
@@ -76,6 +78,11 @@ router.post('/', authenticate, async (req, res, next) => {
     if (!['need', 'offer', 'event'].includes(type)) return res.status(400).json({ error: 'type must be need, offer, or event' });
     if (type === 'event' && !starts_at) return res.status(400).json({ error: 'starts_at is required for events' });
     if (category && !VALID_CATEGORIES.has(category)) return res.status(400).json({ error: 'Invalid category' });
+
+    const text = `${title} ${description || ''}`;
+    if (NSFW_PATTERN.test(text)) {
+      return res.status(422).json({ error: 'This platform does not allow adult content. Please keep posts appropriate for all community members.' });
+    }
 
     if (circle_id) {
       const member = await pool.query(
@@ -192,6 +199,27 @@ router.post('/:id/media', authenticate, uploadMedia.array('media', 5), async (re
     res.status(201).json(inserted);
   } catch (err) {
     req.files?.forEach(f => fs.unlink(f.path, () => {}));
+    next(err);
+  }
+});
+
+// POST /api/posts/:id/report
+router.post('/:id/report', authenticate, async (req, res, next) => {
+  try {
+    const post = await pool.query('SELECT id, user_id FROM posts WHERE id = $1', [req.params.id]);
+    if (!post.rows[0]) return res.status(404).json({ error: 'Post not found' });
+    if (post.rows[0].user_id === req.user.id) {
+      return res.status(400).json({ error: 'You cannot report your own post' });
+    }
+
+    await pool.query(
+      `INSERT INTO post_reports (post_id, user_id, reason) VALUES ($1, $2, $3)
+       ON CONFLICT (post_id, user_id) DO NOTHING`,
+      [req.params.id, req.user.id, req.body.reason || null]
+    );
+    await pool.query('UPDATE posts SET content_flagged = TRUE WHERE id = $1', [req.params.id]);
+    res.json({ reported: true });
+  } catch (err) {
     next(err);
   }
 });
