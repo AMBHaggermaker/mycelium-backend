@@ -62,4 +62,21 @@ router.get('/rooms/:slug/messages', async (req, res, next) => {
   }
 });
 
+// POST /api/chat/rooms/:slug/report
+router.post('/rooms/:slug/report', authenticate, async (req, res, next) => {
+  try {
+    const room = await pool.query('SELECT id FROM chat_rooms WHERE slug = $1', [req.params.slug]);
+    if (!room.rows[0]) return res.status(404).json({ error: 'Room not found' });
+
+    await pool.query(
+      `INSERT INTO room_reports (room_id, user_id) VALUES ($1, $2) ON CONFLICT (room_id, user_id) DO NOTHING`,
+      [room.rows[0].id, req.user.id]
+    );
+    await pool.query('UPDATE chat_rooms SET flagged = TRUE WHERE id = $1', [room.rows[0].id]);
+    res.json({ reported: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;

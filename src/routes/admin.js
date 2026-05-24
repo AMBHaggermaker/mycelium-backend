@@ -99,4 +99,59 @@ router.patch('/users/:userId/role', requireRole('admin'), async (req, res, next)
   }
 });
 
+// ── Chat room management (moderator+) ────────────────────────────────────────
+
+// GET /api/admin/chat-rooms
+router.get('/chat-rooms', requireRole('moderator', 'admin'), async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT r.id, r.name, r.slug, r.description, r.pinned, r.flagged, r.is_public, r.created_at,
+              u.username AS creator,
+              (SELECT COUNT(*)::int FROM chat_messages WHERE room_id = r.id) AS message_count,
+              (SELECT COUNT(*)::int FROM room_reports WHERE room_id = r.id) AS report_count
+       FROM chat_rooms r
+       LEFT JOIN users u ON u.id = r.created_by
+       ORDER BY r.pinned DESC, r.created_at ASC`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/admin/chat-rooms/:roomId
+router.delete('/chat-rooms/:roomId', requireRole('admin'), async (req, res, next) => {
+  try {
+    const room = await pool.query('SELECT pinned FROM chat_rooms WHERE id = $1', [req.params.roomId]);
+    if (!room.rows[0]) return res.status(404).json({ error: 'Room not found' });
+    if (room.rows[0].pinned) {
+      return res.status(403).json({ error: 'Protected rooms cannot be deleted' });
+    }
+    await pool.query('DELETE FROM chat_rooms WHERE id = $1', [req.params.roomId]);
+    res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/admin/chat-rooms/:roomId/flag — toggles the flag; moderators can flag but not unflag
+router.patch('/chat-rooms/:roomId/flag', requireRole('moderator', 'admin'), async (req, res, next) => {
+  try {
+    const room = await pool.query('SELECT flagged FROM chat_rooms WHERE id = $1', [req.params.roomId]);
+    if (!room.rows[0]) return res.status(404).json({ error: 'Room not found' });
+
+    const role = req.user?.role || 'member';
+    // Moderators can only flag (not unflag); admins can toggle either way
+    const newFlagged = role === 'admin' ? !room.rows[0].flagged : true;
+
+    const result = await pool.query(
+      'UPDATE chat_rooms SET flagged = $1 WHERE id = $2 RETURNING flagged',
+      [newFlagged, req.params.roomId]
+    );
+    res.json({ flagged: result.rows[0].flagged });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
