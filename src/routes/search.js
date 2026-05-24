@@ -3,10 +3,10 @@ const pool = require('../db');
 
 const router = express.Router();
 
-// GET /api/search?q=&type=posts|circles|users|all&circle_id=&post_type=&limit=
+// GET /api/search?q=&type=posts|circles|users|all&circle_id=&post_type=&category=&subcategory=&limit=
 router.get('/', async (req, res, next) => {
   try {
-    const { q, type = 'all', circle_id, post_type, limit = 20 } = req.query;
+    const { q, type = 'all', circle_id, post_type, category, subcategory, limit = 20 } = req.query;
     if (!q?.trim()) return res.status(400).json({ error: 'q query parameter is required' });
 
     const results = {};
@@ -16,7 +16,7 @@ router.get('/', async (req, res, next) => {
     if (type === 'all' || type === 'posts') {
       const params = [searchTerm];
       const conditions = [
-        `(p.title ILIKE $1 OR p.description ILIKE $1)`,
+        `(p.title ILIKE $1 OR p.description ILIKE $1 OR p.subcategory ILIKE $1)`,
         `p.status = 'active'`
       ];
 
@@ -28,11 +28,20 @@ router.get('/', async (req, res, next) => {
         params.push(post_type);
         conditions.push(`p.type = $${params.length}::post_type`);
       }
+      if (category) {
+        params.push(category);
+        conditions.push(`p.category = $${params.length}`);
+      }
+      if (subcategory) {
+        params.push(`%${subcategory}%`);
+        conditions.push(`p.subcategory ILIKE $${params.length}`);
+      }
 
       params.push(lim);
       const postResults = await pool.query(
         `SELECT p.id, p.type, p.title, p.description, p.location, p.status,
-                p.capacity, p.reserved_count, p.starts_at, p.tags, p.created_at,
+                p.capacity, p.reserved_count, p.starts_at, p.tags,
+                p.category, p.subcategory, p.created_at,
                 u.username, u.reliability_score, c.name AS circle_name
          FROM posts p
          JOIN users u ON u.id = p.user_id

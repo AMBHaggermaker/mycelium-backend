@@ -16,6 +16,8 @@ const ALLOWED_MIME = new Set([
   'video/mp4', 'video/webm', 'video/quicktime',
 ]);
 
+const VALID_CATEGORIES = new Set(['jobs_services', 'goods_supplies', 'community']);
+
 const mediaStorage = multer.diskStorage({
   destination: uploadDir,
   filename: (req, file, cb) => {
@@ -35,15 +37,17 @@ const MEDIA_SQL = `(SELECT COALESCE(json_agg(pm ORDER BY pm.created_at), '[]') F
 // GET /api/posts
 router.get('/', async (req, res, next) => {
   try {
-    const { type, circle_id, status, tags, page = 1, limit = 20 } = req.query;
+    const { type, circle_id, status, tags, category, subcategory, page = 1, limit = 20 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const params = [];
     const conditions = [];
 
-    if (type)      { params.push(type);                                 conditions.push(`p.type = $${params.length}::post_type`); }
-    if (circle_id) { params.push(circle_id);                            conditions.push(`p.circle_id = $${params.length}`); }
-    if (status)    { params.push(status);                               conditions.push(`p.status = $${params.length}::post_status`); }
-    if (tags)      { params.push(tags.split(',').map(t => t.trim()));   conditions.push(`p.tags && $${params.length}::text[]`); }
+    if (type)       { params.push(type);                                  conditions.push(`p.type = $${params.length}::post_type`); }
+    if (circle_id)  { params.push(circle_id);                             conditions.push(`p.circle_id = $${params.length}`); }
+    if (status)     { params.push(status);                                conditions.push(`p.status = $${params.length}::post_status`); }
+    if (tags)       { params.push(tags.split(',').map(t => t.trim()));    conditions.push(`p.tags && $${params.length}::text[]`); }
+    if (category)   { params.push(category);                              conditions.push(`p.category = $${params.length}`); }
+    if (subcategory){ params.push(subcategory);                           conditions.push(`p.subcategory ILIKE $${params.length}`); }
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     params.push(parseInt(limit), offset);
@@ -67,10 +71,11 @@ router.get('/', async (req, res, next) => {
 // POST /api/posts
 router.post('/', authenticate, async (req, res, next) => {
   try {
-    const { type, title, description, circle_id, capacity, location, starts_at, ends_at, tags } = req.body;
+    const { type, title, description, circle_id, capacity, location, starts_at, ends_at, tags, category, subcategory } = req.body;
     if (!type || !title) return res.status(400).json({ error: 'type and title are required' });
     if (!['need', 'offer', 'event'].includes(type)) return res.status(400).json({ error: 'type must be need, offer, or event' });
     if (type === 'event' && !starts_at) return res.status(400).json({ error: 'starts_at is required for events' });
+    if (category && !VALID_CATEGORIES.has(category)) return res.status(400).json({ error: 'Invalid category' });
 
     if (circle_id) {
       const member = await pool.query(
@@ -81,11 +86,12 @@ router.post('/', authenticate, async (req, res, next) => {
     }
 
     const result = await pool.query(
-      `INSERT INTO posts (type, title, description, user_id, circle_id, capacity, location, starts_at, ends_at, tags)
-       VALUES ($1::post_type, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `INSERT INTO posts (type, title, description, user_id, circle_id, capacity, location, starts_at, ends_at, tags, category, subcategory)
+       VALUES ($1::post_type, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING *, '[]'::json AS media`,
       [type, title.trim(), description || null, req.user.id, circle_id || null,
-       capacity || null, location || null, starts_at || null, ends_at || null, tags || []]
+       capacity || null, location || null, starts_at || null, ends_at || null,
+       tags || [], category || null, subcategory?.trim() || null]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -118,7 +124,11 @@ router.patch('/:id', authenticate, async (req, res, next) => {
     if (!existing.rows[0]) return res.status(404).json({ error: 'Post not found' });
     if (existing.rows[0].user_id !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
 
-    const { title, description, capacity, location, starts_at, ends_at, status, tags } = req.body;
+    const { title, description, capacity, location, starts_at, ends_at, status, tags, category, subcategory } = req.body;
+    if (category !== undefined && category !== null && !VALID_CATEGORIES.has(category)) {
+      return res.status(400).json({ error: 'Invalid category' });
+    }
+
     const result = await pool.query(
       `UPDATE posts SET
          title       = COALESCE($1, title),
@@ -129,10 +139,13 @@ router.patch('/:id', authenticate, async (req, res, next) => {
          ends_at     = COALESCE($6, ends_at),
          status      = COALESCE($7::post_status, status),
          tags        = COALESCE($8::text[], tags),
+         category    = COALESCE($9, category),
+         subcategory = COALESCE($10, subcategory),
          updated_at  = NOW()
-       WHERE id = $9
+       WHERE id = $11
        RETURNING *`,
-      [title, description, capacity, location, starts_at, ends_at, status, tags, req.params.id]
+      [title, description, capacity, location, starts_at, ends_at, status, tags,
+       category || null, subcategory?.trim() || null, req.params.id]
     );
     res.json(result.rows[0]);
   } catch (err) {
