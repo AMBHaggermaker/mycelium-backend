@@ -14,7 +14,9 @@ const JWT_SECRET = process.env.JWT_SECRET || 'mycelium_jwt_secret_change_in_prod
 const app = express();
 const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
+  path: '/api/socket.io',
   cors: { origin: '*', methods: ['GET', 'POST'] },
+  transports: ['polling', 'websocket'],
 });
 
 const PORT = process.env.PORT || 3000;
