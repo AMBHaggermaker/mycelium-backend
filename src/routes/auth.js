@@ -3,7 +3,8 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
 const authenticate = require('../middleware/auth');
-const { welcomeBackEmail } = require('../lib/email');
+const crypto = require('crypto');
+const { welcomeBackEmail, emailChangeVerification } = require('../lib/email');
 
 const FOUNDER_USERNAME = 'AMBHaggermaker';
 
@@ -237,7 +238,7 @@ router.get('/me', authenticate, async (req, res, next) => {
   try {
     const result = await pool.query(
       `SELECT id, username, email, role, bio, location, reliability_score, avatar_url,
-              verified, founding_member, created_at
+              verified, founding_member, email_pending, created_at
        FROM users WHERE id = $1`,
       [req.user.id]
     );
@@ -268,6 +269,106 @@ router.patch('/change-password', authenticate, async (req, res, next) => {
     const hash = await bcrypt.hash(new_password, 12);
     await pool.query('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [hash, req.user.id]);
 
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/auth/request-email-change
+router.post('/request-email-change', authenticate, async (req, res, next) => {
+  try {
+    const { current_password, new_email } = req.body;
+    if (!current_password || !new_email) {
+      return res.status(400).json({ error: 'current_password and new_email are required' });
+    }
+
+    const emailClean = new_email.toLowerCase().trim();
+    if (emailClean === req.user.email?.toLowerCase()) {
+      return res.status(400).json({ error: 'New email is the same as your current email' });
+    }
+
+    const userResult = await pool.query('SELECT password_hash FROM users WHERE id = $1', [req.user.id]);
+    if (!userResult.rows[0]) return res.status(404).json({ error: 'User not found' });
+
+    const valid = await bcrypt.compare(current_password, userResult.rows[0].password_hash);
+    if (!valid) return res.status(401).json({ error: 'Current password is incorrect' });
+
+    const taken = await pool.query(
+      'SELECT id FROM users WHERE email = $1 AND id != $2 AND is_active = TRUE',
+      [emailClean, req.user.id]
+    );
+    if (taken.rows[0]) {
+      return res.status(409).json({ error: 'That email address is already in use' });
+    }
+
+    const changeToken  = crypto.randomUUID();
+    const expiresAt    = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    await pool.query(
+      `UPDATE users SET email_pending = $1, email_change_token = $2, email_change_expires_at = $3
+       WHERE id = $4`,
+      [emailClean, changeToken, expiresAt, req.user.id]
+    );
+
+    emailChangeVerification({
+      username:    req.user.username,
+      newEmail:    emailClean,
+      changeToken,
+      toEmail:     emailClean,
+    }).catch(e => console.error('[email-change] verification email failed:', e.message));
+
+    res.json({ ok: true, email_pending: emailClean });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/auth/verify-email-change?token=X  (public — linked from verification email)
+router.get('/verify-email-change', async (req, res, next) => {
+  try {
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ error: 'token is required' });
+
+    const result = await pool.query(
+      `SELECT id, username, email_pending, email_change_expires_at
+       FROM users WHERE email_change_token = $1`,
+      [token]
+    );
+    if (!result.rows[0]) {
+      return res.status(404).json({ error: 'Invalid or already-used verification link' });
+    }
+
+    const { id, username, email_pending, email_change_expires_at } = result.rows[0];
+    if (new Date(email_change_expires_at) < new Date()) {
+      return res.status(410).json({ error: 'This verification link has expired. Request a new one from Settings.' });
+    }
+
+    await pool.query(
+      `UPDATE users SET
+         email = email_pending,
+         email_pending = NULL,
+         email_change_token = NULL,
+         email_change_expires_at = NULL,
+         updated_at = NOW()
+       WHERE id = $1`,
+      [id]
+    );
+
+    res.json({ ok: true, email: email_pending, username });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/auth/request-email-change — cancel a pending email change
+router.delete('/request-email-change', authenticate, async (req, res, next) => {
+  try {
+    await pool.query(
+      `UPDATE users SET email_pending = NULL, email_change_token = NULL, email_change_expires_at = NULL
+       WHERE id = $1`,
+      [req.user.id]
+    );
     res.json({ ok: true });
   } catch (err) {
     next(err);

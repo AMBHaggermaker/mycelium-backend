@@ -130,18 +130,16 @@ router.patch('/users/:userId/restore', requireRole('admin'), async (req, res, ne
     if (target.rows[0].is_active) return res.status(409).json({ error: 'Account is already active' });
 
     const { original_username, original_email } = target.rows[0];
-    if (!original_username || !original_email) {
-      return res.status(400).json({ error: 'Cannot restore — original data was not preserved for this account' });
-    }
 
+    // Best-effort restore: use originals if available, keep anonymized values if not
     const result = await pool.query(
       `UPDATE users SET
          is_active = TRUE,
          deleted_at = NULL,
-         username = original_username,
-         email = original_email,
+         username = COALESCE(original_username, username),
+         email    = COALESCE(original_email,    email),
          original_username = NULL,
-         original_email = NULL,
+         original_email    = NULL,
          updated_at = NOW()
        WHERE id = $1
        RETURNING id, username, email, role, is_active`,
@@ -149,10 +147,13 @@ router.patch('/users/:userId/restore', requireRole('admin'), async (req, res, ne
     );
     const restored = result.rows[0];
 
-    const { welcomeBackEmail } = require('../lib/email');
-    welcomeBackEmail({ username: restored.username, toEmail: restored.email }).catch(e => {
-      console.error('[admin restore] welcome back email failed:', e.message);
-    });
+    // Only send welcome-back email if we had the real email address
+    if (original_email) {
+      const { welcomeBackEmail } = require('../lib/email');
+      welcomeBackEmail({ username: restored.username, toEmail: restored.email }).catch(e => {
+        console.error('[admin restore] welcome back email failed:', e.message);
+      });
+    }
 
     res.json(restored);
   } catch (err) {

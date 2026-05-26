@@ -118,4 +118,41 @@ function welcomeBackEmail({ username, toEmail }) {
   return sendEmail({ to: toEmail, subject: 'Welcome back to Mycelium', html });
 }
 
-module.exports = { sendEmail, invitationEmail, welcomeBackEmail };
+function emailChangeVerification({ username, newEmail, changeToken, toEmail }) {
+  const baseUrl = process.env.APP_BASE_URL || 'https://mycelium.unprecedentedtimes.org';
+  const link    = `${baseUrl}/verify-email?token=${changeToken}`;
+  console.log(`[email] emailChangeVerification — username=${username} to=${toEmail}`);
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f2ede4;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <div style="max-width:520px;margin:40px auto;background:#fff;border-radius:12px;overflow:hidden;border:1px solid #ddd6c8;">
+    <div style="background:#2a5f0a;padding:32px 40px;text-align:center;">
+      <p style="color:#c8e6b0;font-size:13px;margin:0 0 8px;letter-spacing:.08em;text-transform:uppercase;">&#x2B21; Mycelium</p>
+      <h1 style="color:#fff;margin:0;font-size:22px;font-weight:700;">Confirm your new email</h1>
+    </div>
+    <div style="padding:36px 40px;">
+      <p style="font-size:16px;color:#1a1710;margin:0 0 16px;">
+        Hi <strong>${username}</strong>, click the button below to confirm <strong>${newEmail}</strong> as your new Mycelium email address.
+      </p>
+      <p style="font-size:14px;color:#6b6254;margin:0 0 28px;">
+        If you didn't request this change, you can safely ignore this email.
+        This link expires in 24 hours.
+      </p>
+      <div style="text-align:center;margin:0 0 24px;">
+        <a href="${link}" style="display:inline-block;background:#2a5f0a;color:#fff;text-decoration:none;padding:14px 36px;border-radius:99px;font-size:15px;font-weight:700;">Confirm New Email</a>
+      </div>
+      <p style="font-size:12px;color:#6b6254;text-align:center;margin:0;">
+        Or copy: <a href="${link}" style="color:#2a5f0a;">${link}</a>
+      </p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+  return sendEmail({ to: toEmail, subject: 'Confirm your new Mycelium email address', html });
+}
+
+module.exports = { sendEmail, invitationEmail, welcomeBackEmail, emailChangeVerification };
