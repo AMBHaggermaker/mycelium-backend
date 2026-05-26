@@ -33,6 +33,7 @@ app.use('/api/search',       require('./routes/search'));
 app.use('/api/reservations', require('./routes/reservations'));
 app.use('/api/chat',         require('./routes/chat'));
 app.use('/api/admin',        require('./routes/admin'));
+app.use('/api/watch',        require('./routes/watch'));
 
 app.get('/api/health', async (req, res) => {
   try {

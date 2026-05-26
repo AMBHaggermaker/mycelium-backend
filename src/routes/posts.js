@@ -67,7 +67,7 @@ const SORT_ORDER = {
 // GET /api/posts
 router.get('/', async (req, res, next) => {
   try {
-    const { type, circle_id, status, tags, category, subcategory, sort = 'recent', page = 1, limit = 20 } = req.query;
+    const { type, circle_id, status, tags, category, subcategory, sort = 'recent', page = 1, limit = 20, feed_tab, commerce_type: ctFilter } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const params = [];
     const conditions = [];
@@ -78,6 +78,16 @@ router.get('/', async (req, res, next) => {
     if (tags)       { params.push(tags.split(',').map(t => t.trim()));    conditions.push(`p.tags && $${params.length}::text[]`); }
     if (category)   { params.push(category);                              conditions.push(`p.category = $${params.length}`); }
     if (subcategory){ params.push(subcategory);                           conditions.push(`p.subcategory ILIKE $${params.length}`); }
+    if (ctFilter)   { params.push(ctFilter);                              conditions.push(`p.commerce_type = $${params.length}`); }
+
+    if (feed_tab === 'community') {
+      conditions.push(`(p.commerce_type IS NULL OR p.commerce_type = 'exchange')`);
+      conditions.push(`(p.auto_urgent = FALSE AND p.is_urgent = FALSE)`);
+    } else if (feed_tab === 'commerce') {
+      conditions.push(`p.commerce_type = 'commerce'`);
+    } else if (feed_tab === 'urgent') {
+      conditions.push(`(p.auto_urgent = TRUE OR p.is_urgent = TRUE OR p.commerce_type = 'urgent')`);
+    }
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const orderBy = SORT_ORDER[sort] || SORT_ORDER.recent;
@@ -105,11 +115,13 @@ router.get('/', async (req, res, next) => {
 router.post('/', authenticate, async (req, res, next) => {
   try {
     const { type, title, description, circle_id, capacity, location, starts_at, ends_at,
-            tags, category, subcategory, is_urgent, expires_at } = req.body;
+            tags, category, subcategory, is_urgent, expires_at, commerce_type, price } = req.body;
     if (!type || !title) return res.status(400).json({ error: 'type and title are required' });
     if (!['need', 'offer', 'event'].includes(type)) return res.status(400).json({ error: 'type must be need, offer, or event' });
     if (type === 'event' && !starts_at) return res.status(400).json({ error: 'starts_at is required for events' });
     if (category && !VALID_CATEGORIES.has(category)) return res.status(400).json({ error: 'Invalid category' });
+    const VALID_COMMERCE = new Set(['exchange', 'commerce', 'urgent']);
+    if (commerce_type && !VALID_COMMERCE.has(commerce_type)) return res.status(400).json({ error: 'Invalid commerce_type' });
 
     const text = `${title} ${description || ''}`;
     if (NSFW_PATTERN.test(text)) {
@@ -127,16 +139,19 @@ router.post('/', authenticate, async (req, res, next) => {
     const parsedTags = Array.isArray(tags) ? tags : (tags || []);
     const autoUrgent = isAutoUrgent(parsedTags);
     const userUrgent = is_urgent === true || is_urgent === 'true';
+    const resolvedCommerceType = autoUrgent ? 'urgent' : (commerce_type || null);
 
     const result = await pool.query(
       `INSERT INTO posts (type, title, description, user_id, circle_id, capacity, location,
-                          starts_at, ends_at, tags, category, subcategory, is_urgent, auto_urgent, expires_at)
-       VALUES ($1::post_type, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                          starts_at, ends_at, tags, category, subcategory, is_urgent, auto_urgent,
+                          expires_at, commerce_type, price)
+       VALUES ($1::post_type, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
        RETURNING *, '[]'::json AS media`,
       [type, title.trim(), description || null, req.user.id, circle_id || null,
        capacity || null, location || null, starts_at || null, ends_at || null,
        parsedTags, category || null, subcategory?.trim() || null,
-       userUrgent, autoUrgent, expires_at || null]
+       userUrgent, autoUrgent, expires_at || null, resolvedCommerceType,
+       price != null ? parseFloat(price) : null]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -170,9 +185,13 @@ router.patch('/:id', authenticate, async (req, res, next) => {
     if (existing.rows[0].user_id !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
 
     const { title, description, capacity, location, starts_at, ends_at, status,
-            tags, category, subcategory, is_urgent, expires_at } = req.body;
+            tags, category, subcategory, is_urgent, expires_at, commerce_type, price } = req.body;
     if (category !== undefined && category !== null && !VALID_CATEGORIES.has(category)) {
       return res.status(400).json({ error: 'Invalid category' });
+    }
+    const VALID_COMMERCE_PATCH = new Set(['exchange', 'commerce', 'urgent']);
+    if (commerce_type !== undefined && commerce_type !== null && !VALID_COMMERCE_PATCH.has(commerce_type)) {
+      return res.status(400).json({ error: 'Invalid commerce_type' });
     }
 
     const parsedTags = tags !== undefined ? (Array.isArray(tags) ? tags : tags) : undefined;
@@ -181,21 +200,23 @@ router.patch('/:id', authenticate, async (req, res, next) => {
 
     const result = await pool.query(
       `UPDATE posts SET
-         title       = COALESCE($1, title),
-         description = COALESCE($2, description),
-         capacity    = COALESCE($3, capacity),
-         location    = COALESCE($4, location),
-         starts_at   = COALESCE($5, starts_at),
-         ends_at     = COALESCE($6, ends_at),
-         status      = COALESCE($7::post_status, status),
-         tags        = COALESCE($8::text[], tags),
-         category    = COALESCE($9, category),
-         subcategory = COALESCE($10, subcategory),
-         is_urgent   = COALESCE($11, is_urgent),
-         auto_urgent = COALESCE($12, auto_urgent),
-         expires_at  = COALESCE($13, expires_at),
-         updated_at  = NOW()
-       WHERE id = $14
+         title         = COALESCE($1, title),
+         description   = COALESCE($2, description),
+         capacity      = COALESCE($3, capacity),
+         location      = COALESCE($4, location),
+         starts_at     = COALESCE($5, starts_at),
+         ends_at       = COALESCE($6, ends_at),
+         status        = COALESCE($7::post_status, status),
+         tags          = COALESCE($8::text[], tags),
+         category      = COALESCE($9, category),
+         subcategory   = COALESCE($10, subcategory),
+         is_urgent     = COALESCE($11, is_urgent),
+         auto_urgent   = COALESCE($12, auto_urgent),
+         expires_at    = COALESCE($13, expires_at),
+         commerce_type = COALESCE($14, commerce_type),
+         price         = COALESCE($15, price),
+         updated_at    = NOW()
+       WHERE id = $16
        RETURNING *`,
       [title, description, capacity, location, starts_at, ends_at, status,
        parsedTags !== undefined ? parsedTags : null,
@@ -203,6 +224,8 @@ router.patch('/:id', authenticate, async (req, res, next) => {
        userUrgent !== undefined ? userUrgent : null,
        autoUrgent !== undefined ? autoUrgent : null,
        expires_at !== undefined ? expires_at : null,
+       commerce_type !== undefined ? commerce_type : null,
+       price != null ? parseFloat(price) : null,
        req.params.id]
     );
     res.json(result.rows[0]);
