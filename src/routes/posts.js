@@ -94,7 +94,8 @@ router.get('/', async (req, res, next) => {
     params.push(parseInt(limit), offset);
 
     const result = await pool.query(
-      `SELECT p.*, u.username, u.reliability_score, c.name AS circle_name,
+      `SELECT p.*, u.username, u.reliability_score, u.verified AS author_verified,
+              u.founding_member, c.name AS circle_name,
               ${PRIORITY_SCORE_SQL} AS priority_score,
               ${MEDIA_SQL}
        FROM posts p

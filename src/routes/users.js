@@ -31,7 +31,9 @@ const upload = multer({
 router.get('/:id', async (req, res, next) => {
   try {
     const result = await pool.query(
-      `SELECT id, username, bio, location, reliability_score, avatar_url, created_at FROM users WHERE id = $1`,
+      `SELECT id, username, bio, location, reliability_score, avatar_url,
+              verified, founding_member, created_at
+       FROM users WHERE id = $1`,
       [req.params.id]
     );
     if (!result.rows[0]) return res.status(404).json({ error: 'User not found' });
@@ -116,7 +118,8 @@ router.get('/:id/posts', async (req, res, next) => {
 
     params.push(parseInt(limit), offset);
     const result = await pool.query(
-      `SELECT p.*, u.username, u.reliability_score, c.name AS circle_name,
+      `SELECT p.*, u.username, u.reliability_score, u.verified AS author_verified,
+              u.founding_member, c.name AS circle_name,
               (SELECT COALESCE(json_agg(pm ORDER BY pm.created_at), '[]') FROM post_media pm WHERE pm.post_id = p.id) AS media
        FROM posts p
        JOIN users u ON u.id = p.user_id
