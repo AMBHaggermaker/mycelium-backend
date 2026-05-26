@@ -64,6 +64,7 @@ router.get('/users', requireRole('admin'), async (req, res, next) => {
   try {
     const result = await pool.query(
       `SELECT id, username, email, role, reliability_score, is_active, deleted_at, created_at,
+              original_username,
               (SELECT COUNT(*)::int FROM posts WHERE user_id = users.id) AS post_count,
               (SELECT COUNT(*)::int FROM post_reports pr JOIN posts p ON p.id = pr.post_id WHERE p.user_id = users.id) AS flag_count
        FROM users
@@ -98,20 +99,66 @@ router.patch('/users/:userId/delete', requireRole('admin'), async (req, res, nex
 
     const result = await pool.query(
       `UPDATE users
-       SET is_active = FALSE,
-           deleted_at = NOW(),
-           username = $1,
-           email = $2,
+       SET original_username = username,
+           original_email    = email,
+           is_active    = FALSE,
+           deleted_at   = NOW(),
+           username     = $1,
+           email        = $2,
            password_hash = '',
-           bio = NULL,
-           location = NULL,
-           avatar_url = NULL
+           bio          = NULL,
+           location     = NULL,
+           avatar_url   = NULL
        WHERE id = $3
        RETURNING id, username, is_active, deleted_at`,
       [anonymizedUsername, anonymizedEmail, req.params.userId]
     );
     res.json(result.rows[0]);
   } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/admin/users/:userId/restore — reactivate a soft-deleted account
+router.patch('/users/:userId/restore', requireRole('admin'), async (req, res, next) => {
+  try {
+    const target = await pool.query(
+      'SELECT id, original_username, original_email, is_active FROM users WHERE id = $1',
+      [req.params.userId]
+    );
+    if (!target.rows[0]) return res.status(404).json({ error: 'User not found' });
+    if (target.rows[0].is_active) return res.status(409).json({ error: 'Account is already active' });
+
+    const { original_username, original_email } = target.rows[0];
+    if (!original_username || !original_email) {
+      return res.status(400).json({ error: 'Cannot restore — original data was not preserved for this account' });
+    }
+
+    const result = await pool.query(
+      `UPDATE users SET
+         is_active = TRUE,
+         deleted_at = NULL,
+         username = original_username,
+         email = original_email,
+         original_username = NULL,
+         original_email = NULL,
+         updated_at = NOW()
+       WHERE id = $1
+       RETURNING id, username, email, role, is_active`,
+      [req.params.userId]
+    );
+    const restored = result.rows[0];
+
+    const { welcomeBackEmail } = require('../lib/email');
+    welcomeBackEmail({ username: restored.username, toEmail: restored.email }).catch(e => {
+      console.error('[admin restore] welcome back email failed:', e.message);
+    });
+
+    res.json(restored);
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'Cannot restore — username or email conflict with an existing account' });
+    }
     next(err);
   }
 });

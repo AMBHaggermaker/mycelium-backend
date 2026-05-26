@@ -86,4 +86,36 @@ function invitationEmail({ inviterName, inviteToken, personalNote, toEmail }) {
   return sendEmail({ to: toEmail, subject: `${inviterName} has invited you to join Mycelium`, html });
 }
 
-module.exports = { sendEmail, invitationEmail };
+function welcomeBackEmail({ username, toEmail }) {
+  const baseUrl = process.env.APP_BASE_URL || 'https://mycelium.unprecedentedtimes.org';
+  console.log(`[email] welcomeBackEmail — username=${username} to=${toEmail}`);
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f2ede4;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <div style="max-width:520px;margin:40px auto;background:#fff;border-radius:12px;overflow:hidden;border:1px solid #ddd6c8;">
+    <div style="background:#2a5f0a;padding:32px 40px;text-align:center;">
+      <p style="color:#c8e6b0;font-size:13px;margin:0 0 8px;letter-spacing:.08em;text-transform:uppercase;">&#x2B21; Mycelium</p>
+      <h1 style="color:#fff;margin:0;font-size:22px;font-weight:700;">Welcome back</h1>
+    </div>
+    <div style="padding:36px 40px;">
+      <p style="font-size:16px;color:#1a1710;margin:0 0 16px;">
+        Welcome back, <strong>${username}</strong>. Your account has been restored.
+      </p>
+      <p style="font-size:14px;color:#6b6254;margin:0 0 28px;">
+        Your posts and community history are intact. The chain grows.
+      </p>
+      <div style="text-align:center;margin:0 0 24px;">
+        <a href="${baseUrl}" style="display:inline-block;background:#2a5f0a;color:#fff;text-decoration:none;padding:14px 36px;border-radius:99px;font-size:15px;font-weight:700;">Go to Mycelium</a>
+      </div>
+    </div>
+  </div>
+</body>
+</html>`;
+
+  return sendEmail({ to: toEmail, subject: 'Welcome back to Mycelium', html });
+}
+
+module.exports = { sendEmail, invitationEmail, welcomeBackEmail };

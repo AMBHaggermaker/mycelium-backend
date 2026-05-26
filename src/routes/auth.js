@@ -3,11 +3,12 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
 const authenticate = require('../middleware/auth');
+const { welcomeBackEmail } = require('../lib/email');
 
 const FOUNDER_USERNAME = 'AMBHaggermaker';
 
 const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'mycelium_jwt_secret_change_in_production';
+const JWT_SECRET    = process.env.JWT_SECRET    || 'mycelium_jwt_secret_change_in_production';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
 function signToken(user) {
@@ -18,15 +19,56 @@ function signToken(user) {
   );
 }
 
+// GET /api/auth/check-email?email=X  (public — used for deleted-account detection)
+router.get('/check-email', async (req, res, next) => {
+  try {
+    const email = req.query.email?.toLowerCase().trim();
+    if (!email) return res.status(400).json({ error: 'email query param required' });
+
+    const active = await pool.query(
+      'SELECT id FROM users WHERE email = $1 AND is_active = TRUE',
+      [email]
+    );
+    if (active.rows[0]) return res.json({ status: 'active' });
+
+    const deleted = await pool.query(
+      'SELECT id, original_username FROM users WHERE original_email = $1 AND is_active = FALSE',
+      [email]
+    );
+    if (deleted.rows[0]) {
+      return res.json({
+        status: 'deleted',
+        deleted_user_id:   deleted.rows[0].id,
+        original_username: deleted.rows[0].original_username,
+      });
+    }
+
+    res.json({ status: 'none' });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /api/auth/register
 router.post('/register', async (req, res, next) => {
   try {
-    const { username, email, password, bio, location, invite_token } = req.body;
+    const { username, email, password, bio, location, invite_token, how_found } = req.body;
     if (!username || !email || !password) {
-      return res.status(400).json({ error: 'username, email, and password are required' });
+      return res.status(400).json({ error: 'Display name, email, and password are required' });
     }
     if (password.length < 8) {
       return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+
+    const emailClean = email.toLowerCase().trim();
+
+    // Block active duplicate
+    const active = await pool.query(
+      'SELECT id FROM users WHERE email = $1 AND is_active = TRUE',
+      [emailClean]
+    );
+    if (active.rows[0]) {
+      return res.status(409).json({ error: 'That email is already registered' });
     }
 
     // Validate invite token if provided
@@ -42,50 +84,121 @@ router.post('/register', async (req, res, next) => {
         return res.status(400).json({ error: 'This invitation is invalid or has expired' });
       }
       invitation = inv.rows[0];
-      // Ensure the invite email matches (soft check — allow any email for flexibility)
     }
 
     const hash = await bcrypt.hash(password, 12);
     const isVerified = !!invitation;
 
     const result = await pool.query(
-      `INSERT INTO users (username, email, password_hash, bio, location, verified)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO users (username, email, password_hash, bio, location, verified, how_found)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id, username, email, role, bio, location, reliability_score, verified,
                  founding_member, created_at`,
-      [username.trim(), email.toLowerCase().trim(), hash,
-       bio || null, location || null, isVerified]
+      [username.trim(), emailClean, hash,
+       bio || null, location?.trim() || null, isVerified, how_found || null]
     );
     const user = result.rows[0];
 
     if (invitation) {
-      // Mark invitation accepted
       await pool.query(
         `UPDATE invitations SET status = 'accepted', accepted_at = NOW() WHERE id = $1`,
         [invitation.id]
       );
-
-      // Create vouch record
       await pool.query(
         `INSERT INTO vouches (voucher_id, vouched_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
         [invitation.invited_by, user.id]
       );
-
-      // If vouched by the founder, grant founding_member
       if (invitation.inviter_username === FOUNDER_USERNAME) {
-        await pool.query(
-          `UPDATE users SET founding_member = TRUE WHERE id = $1`,
-          [user.id]
-        );
+        await pool.query(`UPDATE users SET founding_member = TRUE WHERE id = $1`, [user.id]);
         user.founding_member = true;
       }
     }
 
-    res.status(201).json({ token: signToken(user), user });
+    res.status(201).json({ token: signToken(user), user, via_invite: !!invitation });
   } catch (err) {
     if (err.code === '23505') {
       const field = err.constraint?.includes('email') ? 'email' : 'username';
       return res.status(409).json({ error: `That ${field} is already taken` });
+    }
+    next(err);
+  }
+});
+
+// POST /api/auth/restore/:userId — self-service restore of a soft-deleted account via invite
+router.post('/restore/:userId', async (req, res, next) => {
+  try {
+    const { new_password, invite_token } = req.body;
+    if (!new_password) return res.status(400).json({ error: 'new_password is required' });
+    if (new_password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+
+    const target = await pool.query(
+      'SELECT id, original_username, original_email, is_active FROM users WHERE id = $1 AND is_active = FALSE',
+      [req.params.userId]
+    );
+    if (!target.rows[0]) return res.status(404).json({ error: 'Deleted account not found' });
+
+    const { original_username, original_email } = target.rows[0];
+    if (!original_username || !original_email) {
+      return res.status(400).json({ error: 'Cannot restore — original account data was not preserved' });
+    }
+
+    // Validate invite token if provided
+    let invitation = null;
+    if (invite_token) {
+      const inv = await pool.query(
+        `SELECT i.*, u.username AS inviter_username
+         FROM invitations i JOIN users u ON u.id = i.invited_by
+         WHERE i.token = $1 AND i.status = 'pending' AND i.expires_at > NOW()`,
+        [invite_token]
+      );
+      if (!inv.rows[0]) {
+        return res.status(400).json({ error: 'This invitation is invalid or has expired' });
+      }
+      invitation = inv.rows[0];
+    }
+
+    const hash = await bcrypt.hash(new_password, 12);
+
+    const result = await pool.query(
+      `UPDATE users SET
+         is_active = TRUE,
+         deleted_at = NULL,
+         username = original_username,
+         email = original_email,
+         original_username = NULL,
+         original_email = NULL,
+         password_hash = $1,
+         updated_at = NOW()
+       WHERE id = $2
+       RETURNING id, username, email, role, bio, location, reliability_score, avatar_url,
+                 verified, founding_member, created_at`,
+      [hash, req.params.userId]
+    );
+    const user = result.rows[0];
+
+    if (invitation) {
+      await pool.query(
+        `UPDATE invitations SET status = 'accepted', accepted_at = NOW() WHERE id = $1`,
+        [invitation.id]
+      );
+      await pool.query(
+        `INSERT INTO vouches (voucher_id, vouched_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [invitation.invited_by, user.id]
+      );
+      if (invitation.inviter_username === FOUNDER_USERNAME) {
+        await pool.query(`UPDATE users SET founding_member = TRUE WHERE id = $1`, [user.id]);
+        user.founding_member = true;
+      }
+    }
+
+    welcomeBackEmail({ username: user.username, toEmail: user.email }).catch(e => {
+      console.error('[restore] welcome back email failed:', e.message);
+    });
+
+    res.json({ token: signToken(user), user, restored: true });
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'Cannot restore — username or email conflict with an existing account' });
     }
     next(err);
   }
