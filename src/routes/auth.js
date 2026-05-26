@@ -100,13 +100,16 @@ router.post('/login', async (req, res, next) => {
     }
 
     const result = await pool.query(
-      `SELECT id, username, email, role, password_hash, bio, location, reliability_score, avatar_url, created_at
+      `SELECT id, username, email, role, password_hash, bio, location, reliability_score, avatar_url, created_at, is_active
        FROM users WHERE email = $1`,
       [email.toLowerCase().trim()]
     );
     const user = result.rows[0];
     if (!user || !(await bcrypt.compare(password, user.password_hash))) {
       return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    if (!user.is_active) {
+      return res.status(403).json({ error: 'This account has been deactivated' });
     }
 
     const { password_hash, ...safeUser } = user;

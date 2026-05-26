@@ -63,13 +63,54 @@ router.delete('/moderation/:postId', requireRole('moderator', 'admin'), async (r
 router.get('/users', requireRole('admin'), async (req, res, next) => {
   try {
     const result = await pool.query(
-      `SELECT id, username, email, role, reliability_score, created_at,
+      `SELECT id, username, email, role, reliability_score, is_active, deleted_at, created_at,
               (SELECT COUNT(*)::int FROM posts WHERE user_id = users.id) AS post_count,
               (SELECT COUNT(*)::int FROM post_reports pr JOIN posts p ON p.id = pr.post_id WHERE p.user_id = users.id) AS flag_count
        FROM users
-       ORDER BY created_at ASC`
+       ORDER BY is_active DESC, created_at ASC`
     );
     res.json(result.rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/admin/users/:userId/delete — soft-delete (admin only)
+router.patch('/users/:userId/delete', requireRole('admin'), async (req, res, next) => {
+  try {
+    const target = await pool.query(
+      'SELECT username, is_active FROM users WHERE id = $1',
+      [req.params.userId]
+    );
+    if (!target.rows[0]) return res.status(404).json({ error: 'User not found' });
+    if (target.rows[0].username === 'AMBHaggermaker') {
+      return res.status(403).json({ error: 'The founding account cannot be deleted' });
+    }
+    if (req.params.userId === req.user.id) {
+      return res.status(403).json({ error: 'You cannot delete your own account' });
+    }
+    if (!target.rows[0].is_active) {
+      return res.status(409).json({ error: 'User is already deleted' });
+    }
+
+    const anonymizedUsername = `deleted_${req.params.userId.slice(0, 8)}`;
+    const anonymizedEmail    = `deleted_${req.params.userId}@deleted.invalid`;
+
+    const result = await pool.query(
+      `UPDATE users
+       SET is_active = FALSE,
+           deleted_at = NOW(),
+           username = $1,
+           email = $2,
+           password_hash = '',
+           bio = NULL,
+           location = NULL,
+           avatar_url = NULL
+       WHERE id = $3
+       RETURNING id, username, is_active, deleted_at`,
+      [anonymizedUsername, anonymizedEmail, req.params.userId]
+    );
+    res.json(result.rows[0]);
   } catch (err) {
     next(err);
   }
