@@ -64,14 +64,21 @@ router.post('/', authenticate, async (req, res, next) => {
       [req.user.id, emailClean, personal_note?.trim() || null]
     );
     const invite = result.rows[0];
+    console.log(`[invite] created invitation id=${invite.id} token=${invite.token} for=${emailClean} by=${req.user.username}`);
+    console.log(`[invite] BREVO_API_KEY in route: present=${!!process.env.BREVO_API_KEY} length=${(process.env.BREVO_API_KEY||'').length}`);
 
     // Send email (non-blocking — don't fail the request if email fails)
+    console.log('[invite] calling invitationEmail...');
     invitationEmail({
       inviterName:  req.user.username,
       inviteToken:  invite.token,
       personalNote: invite.personal_note,
       toEmail:      invite.email,
-    }).catch(e => console.error('[invite] email error:', e.message));
+    }).then(() => {
+      console.log('[invite] invitationEmail resolved successfully');
+    }).catch(e => {
+      console.error('[invite] invitationEmail rejected:', e.message);
+    });
 
     res.status(201).json(invite);
   } catch (err) {

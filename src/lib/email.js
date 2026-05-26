@@ -1,23 +1,35 @@
 const https = require('https');
 
-const BREVO_API_KEY   = process.env.BREVO_API_KEY;
-const SENDER_EMAIL    = process.env.BREVO_SENDER_EMAIL || 'noreply@mycelium.unprecedentedtimes.org';
-const SENDER_NAME     = 'Mycelium';
-const BASE_URL        = process.env.APP_BASE_URL || 'https://mycelium.unprecedentedtimes.org';
+// Read at call time, not module load time — avoids stale captures when PM2 passes
+// a cached env snapshot that predates the .env update.
+function getConfig() {
+  return {
+    apiKey:      process.env.BREVO_API_KEY || '',
+    senderEmail: process.env.BREVO_SENDER_EMAIL || 'noreply@mycelium.unprecedentedtimes.org',
+    senderName:  'Mycelium',
+    baseUrl:     process.env.APP_BASE_URL || 'https://mycelium.unprecedentedtimes.org',
+  };
+}
 
 function sendEmail({ to, subject, html }) {
-  if (!BREVO_API_KEY) {
-    console.log(`[email] BREVO_API_KEY not set — skipping send to ${to}`);
-    console.log(`[email] Subject: ${subject}`);
+  const { apiKey, senderEmail, senderName } = getConfig();
+
+  console.log(`[email] sendEmail called — to=${to} subject="${subject}"`);
+  console.log(`[email] BREVO_API_KEY present: ${!!apiKey} length: ${apiKey.length}`);
+
+  if (!apiKey) {
+    console.log('[email] BREVO_API_KEY is empty — skipping Brevo send');
     return Promise.resolve();
   }
 
   const body = JSON.stringify({
-    sender:      { name: SENDER_NAME, email: SENDER_EMAIL },
+    sender:      { name: senderName, email: senderEmail },
     to:          [{ email: to }],
     subject,
     htmlContent: html,
   });
+
+  console.log(`[email] Sending via Brevo API — sender=${senderEmail} to=${to}`);
 
   return new Promise((resolve, reject) => {
     const req = https.request({
@@ -25,30 +37,37 @@ function sendEmail({ to, subject, html }) {
       path:     '/v3/smtp/email',
       method:   'POST',
       headers:  {
-        'api-key':       BREVO_API_KEY,
-        'Content-Type':  'application/json',
+        'api-key':        apiKey,
+        'Content-Type':   'application/json',
         'Content-Length': Buffer.byteLength(body),
       },
     }, res => {
       let data = '';
       res.on('data', chunk => { data += chunk; });
       res.on('end', () => {
+        console.log(`[email] Brevo response status: ${res.statusCode}`);
         if (res.statusCode >= 200 && res.statusCode < 300) {
+          console.log('[email] Brevo send successful');
           resolve();
         } else {
           console.error(`[email] Brevo error ${res.statusCode}:`, data);
-          reject(new Error(`Email send failed (${res.statusCode})`));
+          reject(new Error(`Email send failed (${res.statusCode}): ${data}`));
         }
       });
     });
-    req.on('error', reject);
+    req.on('error', err => {
+      console.error('[email] https request error:', err.message);
+      reject(err);
+    });
     req.write(body);
     req.end();
   });
 }
 
 function invitationEmail({ inviterName, inviteToken, personalNote, toEmail }) {
-  const link = `${BASE_URL}/invite/${inviteToken}`;
+  const { baseUrl } = getConfig();
+  const link = `${baseUrl}/invite/${inviteToken}`;
+  console.log(`[email] invitationEmail — inviter=${inviterName} token=${inviteToken} to=${toEmail}`);
 
   const noteHtml = personalNote
     ? `<div style="margin:24px 0;padding:16px 20px;background:#eaf3e4;border-left:4px solid #2a5f0a;border-radius:6px;font-style:italic;color:#2a3a1a;">${personalNote}</div>`
