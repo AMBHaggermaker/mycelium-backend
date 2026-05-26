@@ -49,16 +49,24 @@ router.patch('/:id', authenticate, async (req, res, next) => {
     if (req.user.id !== req.params.id) {
       return res.status(403).json({ error: 'Forbidden' });
     }
-    const { bio, location, username } = req.body;
+    const { bio, location, username, email } = req.body;
+
+    if (email) {
+      const emailClean = email.toLowerCase().trim();
+      const taken = await pool.query('SELECT id FROM users WHERE email = $1 AND id != $2', [emailClean, req.params.id]);
+      if (taken.rows[0]) return res.status(409).json({ error: 'That email address is already in use' });
+    }
+
     const result = await pool.query(
       `UPDATE users SET
          bio        = COALESCE($1, bio),
          location   = COALESCE($2, location),
          username   = COALESCE($3, username),
+         email      = COALESCE($4, email),
          updated_at = NOW()
-       WHERE id = $4
-       RETURNING id, username, email, bio, location, reliability_score, avatar_url, created_at`,
-      [bio ?? null, location ?? null, username ?? null, req.params.id]
+       WHERE id = $5
+       RETURNING id, username, email, bio, location, reliability_score, avatar_url, verified, founding_member, created_at`,
+      [bio ?? null, location ?? null, username ?? null, email ? email.toLowerCase().trim() : null, req.params.id]
     );
     res.json(result.rows[0]);
   } catch (err) {

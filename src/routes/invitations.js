@@ -8,7 +8,6 @@ const router = express.Router();
 // GET /api/invitations — list my sent invitations
 router.get('/', authenticate, async (req, res, next) => {
   try {
-    // Expire stale ones first
     await pool.query(
       `UPDATE invitations SET status = 'expired'
        WHERE invited_by = $1 AND status = 'pending' AND expires_at < NOW()`,
@@ -41,13 +40,12 @@ router.post('/', authenticate, async (req, res, next) => {
 
     const emailClean = email.toLowerCase().trim();
 
-    // Check if already a member
     const existing = await pool.query('SELECT id FROM users WHERE email = $1', [emailClean]);
     if (existing.rows[0]) {
       return res.status(409).json({ error: 'That email address already has a Mycelium account' });
     }
 
-    // Check for a live pending invite to same address from this user
+    // Only block if there's an active pending invite (not deleted/expired)
     const dupe = await pool.query(
       `SELECT id FROM invitations
        WHERE invited_by = $1 AND email = $2 AND status = 'pending' AND expires_at > NOW()`,
@@ -64,23 +62,72 @@ router.post('/', authenticate, async (req, res, next) => {
       [req.user.id, emailClean, personal_note?.trim() || null]
     );
     const invite = result.rows[0];
-    console.log(`[invite] created invitation id=${invite.id} token=${invite.token} for=${emailClean} by=${req.user.username}`);
-    console.log(`[invite] BREVO_API_KEY in route: present=${!!process.env.BREVO_API_KEY} length=${(process.env.BREVO_API_KEY||'').length}`);
+    console.log(`[invite] created id=${invite.id} token=${invite.token} for=${emailClean} by=${req.user.username}`);
 
-    // Send email (non-blocking — don't fail the request if email fails)
-    console.log('[invite] calling invitationEmail...');
     invitationEmail({
       inviterName:  req.user.username,
       inviteToken:  invite.token,
       personalNote: invite.personal_note,
       toEmail:      invite.email,
     }).then(() => {
-      console.log('[invite] invitationEmail resolved successfully');
+      console.log('[invite] email sent OK');
     }).catch(e => {
-      console.error('[invite] invitationEmail rejected:', e.message);
+      console.error('[invite] email failed:', e.message);
     });
 
     res.status(201).json(invite);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/invitations/:id — delete a pending invitation
+router.delete('/:id', authenticate, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `DELETE FROM invitations
+       WHERE id = $1 AND invited_by = $2 AND status = 'pending'
+       RETURNING id`,
+      [req.params.id, req.user.id]
+    );
+    if (!result.rows[0]) {
+      return res.status(404).json({ error: 'Invitation not found or cannot be deleted' });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/invitations/:id/resend — regenerate token + reset expiry + resend email
+router.post('/:id/resend', authenticate, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `UPDATE invitations
+       SET token = gen_random_uuid(),
+           expires_at = NOW() + INTERVAL '14 days',
+           status = 'pending'
+       WHERE id = $1 AND invited_by = $2 AND status IN ('pending', 'expired')
+       RETURNING *`,
+      [req.params.id, req.user.id]
+    );
+    if (!result.rows[0]) {
+      return res.status(404).json({ error: 'Invitation not found or cannot be resent' });
+    }
+    const invite = result.rows[0];
+
+    invitationEmail({
+      inviterName:  req.user.username,
+      inviteToken:  invite.token,
+      personalNote: invite.personal_note,
+      toEmail:      invite.email,
+    }).then(() => {
+      console.log('[invite] resend email sent OK');
+    }).catch(e => {
+      console.error('[invite] resend email failed:', e.message);
+    });
+
+    res.json(invite);
   } catch (err) {
     next(err);
   }
@@ -101,8 +148,6 @@ router.get('/token/:token', async (req, res, next) => {
     if (!result.rows[0]) return res.status(404).json({ error: 'Invitation not found' });
 
     const invite = result.rows[0];
-
-    // Compute effective status
     if (invite.status === 'pending' && new Date(invite.expires_at) < new Date()) {
       invite.status = 'expired';
     }

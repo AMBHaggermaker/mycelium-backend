@@ -1,72 +1,45 @@
-const https = require('https');
+const nodemailer = require('nodemailer');
 
-// Read at call time, not module load time — avoids stale captures when PM2 passes
-// a cached env snapshot that predates the .env update.
-function getConfig() {
-  return {
-    apiKey:      process.env.BREVO_API_KEY || '',
-    senderEmail: process.env.BREVO_SENDER_EMAIL || 'noreply@mycelium.unprecedentedtimes.org',
-    senderName:  'Mycelium',
-    baseUrl:     process.env.APP_BASE_URL || 'https://mycelium.unprecedentedtimes.org',
-  };
+function createTransport() {
+  return nodemailer.createTransport({
+    host:   process.env.MAIL_HOST || 'smtp-relay.brevo.com',
+    port:   parseInt(process.env.MAIL_PORT || '587', 10),
+    secure: false,
+    auth: {
+      user: process.env.MAIL_USER,
+      pass: process.env.MAIL_PASS,
+    },
+  });
 }
 
 function sendEmail({ to, subject, html }) {
-  const { apiKey, senderEmail, senderName } = getConfig();
+  const from    = process.env.MAIL_FROM || 'noreply@mycelium.unprecedentedtimes.org';
+  const host    = process.env.MAIL_HOST;
+  const user    = process.env.MAIL_USER;
 
-  console.log(`[email] sendEmail called — to=${to} subject="${subject}"`);
-  console.log(`[email] BREVO_API_KEY present: ${!!apiKey} length: ${apiKey.length}`);
+  console.log(`[email] sendEmail — to=${to} subject="${subject}"`);
+  console.log(`[email] MAIL_HOST=${host} MAIL_USER=${user} MAIL_FROM=${from}`);
 
-  if (!apiKey) {
-    console.log('[email] BREVO_API_KEY is empty — skipping Brevo send');
+  if (!user || !process.env.MAIL_PASS) {
+    console.warn('[email] MAIL_USER or MAIL_PASS missing — skipping send');
     return Promise.resolve();
   }
 
-  const body = JSON.stringify({
-    sender:      { name: senderName, email: senderEmail },
-    to:          [{ email: to }],
-    subject,
-    htmlContent: html,
-  });
+  const transporter = createTransport();
 
-  console.log(`[email] Sending via Brevo API — sender=${senderEmail} to=${to}`);
-
-  return new Promise((resolve, reject) => {
-    const req = https.request({
-      hostname: 'api.brevo.com',
-      path:     '/v3/smtp/email',
-      method:   'POST',
-      headers:  {
-        'api-key':        apiKey,
-        'Content-Type':   'application/json',
-        'Content-Length': Buffer.byteLength(body),
-      },
-    }, res => {
-      let data = '';
-      res.on('data', chunk => { data += chunk; });
-      res.on('end', () => {
-        console.log(`[email] Brevo response status: ${res.statusCode}`);
-        if (res.statusCode >= 200 && res.statusCode < 300) {
-          console.log('[email] Brevo send successful');
-          resolve();
-        } else {
-          console.error(`[email] Brevo error ${res.statusCode}:`, data);
-          reject(new Error(`Email send failed (${res.statusCode}): ${data}`));
-        }
-      });
+  return transporter.sendMail({ from, to, subject, html })
+    .then(info => {
+      console.log('[email] sent OK — messageId:', info.messageId);
+    })
+    .catch(err => {
+      console.error('[email] send failed:', err.message);
+      throw err;
     });
-    req.on('error', err => {
-      console.error('[email] https request error:', err.message);
-      reject(err);
-    });
-    req.write(body);
-    req.end();
-  });
 }
 
 function invitationEmail({ inviterName, inviteToken, personalNote, toEmail }) {
-  const { baseUrl } = getConfig();
-  const link = `${baseUrl}/invite/${inviteToken}`;
+  const baseUrl = process.env.APP_BASE_URL || 'https://mycelium.unprecedentedtimes.org';
+  const link    = `${baseUrl}/invite/${inviteToken}`;
   console.log(`[email] invitationEmail — inviter=${inviterName} token=${inviteToken} to=${toEmail}`);
 
   const noteHtml = personalNote
@@ -80,22 +53,22 @@ function invitationEmail({ inviterName, inviteToken, personalNote, toEmail }) {
 <body style="margin:0;padding:0;background:#f2ede4;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
   <div style="max-width:520px;margin:40px auto;background:#fff;border-radius:12px;overflow:hidden;border:1px solid #ddd6c8;">
     <div style="background:#2a5f0a;padding:32px 40px;text-align:center;">
-      <p style="color:#c8e6b0;font-size:13px;margin:0 0 8px;letter-spacing:.08em;text-transform:uppercase;">⬡ Mycelium</p>
+      <p style="color:#c8e6b0;font-size:13px;margin:0 0 8px;letter-spacing:.08em;text-transform:uppercase;">&#x2B21; Mycelium</p>
       <h1 style="color:#fff;margin:0;font-size:22px;font-weight:700;">You've been invited</h1>
     </div>
     <div style="padding:36px 40px;">
       <p style="font-size:16px;color:#1a1710;margin:0 0 8px;">
-        <strong>${inviterName}</strong> has invited you to join Mycelium — a community platform for mutual aid, needs, and offers in Huntsville, Alabama.
+        <strong>${inviterName}</strong> has invited you to join Mycelium &mdash; a community platform for mutual aid, needs, and offers in Huntsville, Alabama.
       </p>
       ${noteHtml}
       <div style="margin:28px 0;padding:20px;background:#faf8f4;border-radius:8px;border:1px solid #ddd6c8;">
         <p style="margin:0 0 12px;font-size:13px;font-weight:700;color:#6b6254;text-transform:uppercase;letter-spacing:.06em;">The Mycelium Covenant</p>
         <ul style="margin:0;padding-left:20px;font-size:14px;color:#1a1710;line-height:1.7;">
-          <li>Show up with integrity — your word matters here</li>
+          <li>Show up with integrity &mdash; your word matters here</li>
           <li>Give more than you take</li>
           <li>Keep it family-friendly and safe for everyone</li>
           <li>Respect the humans behind every post</li>
-          <li>Protect the network — report what feels wrong</li>
+          <li>Protect the network &mdash; report what feels wrong</li>
         </ul>
       </div>
       <div style="text-align:center;margin:32px 0 24px;">
