@@ -273,4 +273,49 @@ router.patch('/chat-rooms/:roomId/flag', requireRole('moderator', 'admin'), asyn
   }
 });
 
+// ── Watch anomaly management (admin only) ────────────────────────────────────
+
+// GET /api/admin/watch-anomalies
+router.get('/watch-anomalies', requireRole('admin'), async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM watch_anomalies
+       ORDER BY reviewed ASC,
+         CASE severity WHEN 'critical' THEN 1 WHEN 'serious' THEN 2 WHEN 'moderate' THEN 3 WHEN 'minor' THEN 4 ELSE 5 END,
+         created_at DESC`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/admin/watch-anomalies/:id/review
+router.patch('/watch-anomalies/:id/review', requireRole('admin'), async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `UPDATE watch_anomalies SET reviewed = TRUE WHERE id = $1 RETURNING *`,
+      [req.params.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Anomaly not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/admin/watch-anomalies/:id
+router.delete('/watch-anomalies/:id', requireRole('admin'), async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `DELETE FROM watch_anomalies WHERE id = $1 RETURNING id`,
+      [req.params.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Anomaly not found' });
+    res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;

@@ -139,4 +139,15 @@ io.on('connection', (socket) => {
 httpServer.listen(PORT, () => {
   console.log(`Mycelium API running on http://localhost:${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/api/health`);
+
+  // Schedule AI anomaly detection every 30 minutes
+  const { runAnomalyDetection } = require('./lib/anomalyDetector');
+  const INTERVAL_MS = 30 * 60 * 1000;
+  // First run after 2-minute warm-up
+  setTimeout(() => {
+    runAnomalyDetection().catch(e => console.error('[anomaly] run error:', e.message));
+    setInterval(() => {
+      runAnomalyDetection().catch(e => console.error('[anomaly] run error:', e.message));
+    }, INTERVAL_MS);
+  }, 2 * 60 * 1000);
 });

@@ -192,4 +192,42 @@ function passwordResetEmail({ username, resetToken, toEmail }) {
   return sendEmail({ to: toEmail, subject: 'Reset your Mycelium password', html });
 }
 
-module.exports = { sendEmail, invitationEmail, welcomeBackEmail, emailChangeVerification, passwordResetEmail };
+function criticalReportAlert({ report, username, adminEmail }) {
+  const baseUrl  = process.env.APP_BASE_URL || 'https://mycelium.unprecedentedtimes.org';
+  const dashboard = report.dashboard_type || '';
+  console.log(`[email] criticalReportAlert — dashboard=${dashboard} to=${adminEmail}`);
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background:#f2ede4;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <div style="max-width:520px;margin:40px auto;background:#fff;border-radius:12px;overflow:hidden;border:1px solid #ddd6c8;">
+    <div style="background:#dc2626;padding:24px 32px;">
+      <p style="color:#fecaca;font-size:12px;margin:0 0 6px;letter-spacing:.08em;text-transform:uppercase;">⬡ Mycelium Watch — Critical Report</p>
+      <h1 style="color:#fff;margin:0;font-size:18px;">${report.title}</h1>
+    </div>
+    <div style="padding:28px 32px;">
+      <table style="font-size:13px;color:#6b6254;border-collapse:collapse;width:100%;margin-bottom:16px;">
+        <tr><td style="padding:4px 0;font-weight:600;width:130px;">Dashboard</td><td>${dashboard}</td></tr>
+        <tr><td style="padding:4px 0;font-weight:600;">Type</td><td>${report.report_type || '—'}</td></tr>
+        ${report.location_label ? `<tr><td style="padding:4px 0;font-weight:600;">Location</td><td>${report.location_label}</td></tr>` : ''}
+        <tr><td style="padding:4px 0;font-weight:600;">Submitted by</td><td>${username}</td></tr>
+      </table>
+      ${report.description ? `<p style="font-size:14px;color:#1a1710;margin:0 0 20px;">${report.description}</p>` : ''}
+      <div style="text-align:center;">
+        <a href="${baseUrl}/watch" style="display:inline-block;background:#2a5f0a;color:#fff;text-decoration:none;padding:12px 28px;border-radius:99px;font-size:14px;font-weight:700;">View in Watch</a>
+      </div>
+    </div>
+  </div>
+</body>
+</html>`;
+
+  return sendEmail({
+    to: adminEmail,
+    subject: `[Mycelium Watch] CRITICAL: ${report.title}`,
+    html,
+  });
+}
+
+module.exports = { sendEmail, invitationEmail, welcomeBackEmail, emailChangeVerification, passwordResetEmail, criticalReportAlert };
