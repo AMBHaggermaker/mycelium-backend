@@ -1,7 +1,9 @@
 const express = require('express');
+const crypto = require('crypto');
 const pool = require('../db');
 const authenticate = require('../middleware/auth');
 const requireRole = require('../middleware/requireRole');
+const { passwordResetEmail } = require('../lib/email');
 
 const router = express.Router();
 
@@ -64,7 +66,7 @@ router.get('/users', requireRole('admin'), async (req, res, next) => {
   try {
     const result = await pool.query(
       `SELECT id, username, email, role, reliability_score, is_active, deleted_at, created_at,
-              original_username,
+              original_username, preserved_display_name,
               (SELECT COUNT(*)::int FROM posts WHERE user_id = users.id) AS post_count,
               (SELECT COUNT(*)::int FROM post_reports pr JOIN posts p ON p.id = pr.post_id WHERE p.user_id = users.id) AS flag_count
        FROM users
@@ -99,8 +101,9 @@ router.patch('/users/:userId/delete', requireRole('admin'), async (req, res, nex
 
     const result = await pool.query(
       `UPDATE users
-       SET original_username = username,
-           original_email    = email,
+       SET original_username      = username,
+           original_email         = email,
+           preserved_display_name = username,
            is_active    = FALSE,
            deleted_at   = NOW(),
            username     = $1,
@@ -183,6 +186,33 @@ router.patch('/users/:userId/role', requireRole('admin'), async (req, res, next)
       [role, req.params.userId]
     );
     res.json(result.rows[0]);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/admin/users/:userId/send-password-reset — trigger password reset email
+router.post('/users/:userId/send-password-reset', requireRole('admin'), async (req, res, next) => {
+  try {
+    const target = await pool.query(
+      'SELECT id, username, email, is_active FROM users WHERE id = $1',
+      [req.params.userId]
+    );
+    if (!target.rows[0]) return res.status(404).json({ error: 'User not found' });
+    if (!target.rows[0].is_active) return res.status(400).json({ error: 'Cannot reset password for a deleted account' });
+
+    const { id, username, email } = target.rows[0];
+    const resetToken = crypto.randomUUID();
+    const expiresAt  = new Date(Date.now() + 60 * 60 * 1000);
+
+    await pool.query(
+      `UPDATE users SET reset_token = $1, reset_expires_at = $2 WHERE id = $3`,
+      [resetToken, expiresAt, id]
+    );
+
+    await passwordResetEmail({ username, resetToken, toEmail: email });
+
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }

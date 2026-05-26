@@ -4,7 +4,7 @@ const jwt = require('jsonwebtoken');
 const pool = require('../db');
 const authenticate = require('../middleware/auth');
 const crypto = require('crypto');
-const { welcomeBackEmail, emailChangeVerification } = require('../lib/email');
+const { welcomeBackEmail, emailChangeVerification, passwordResetEmail } = require('../lib/email');
 
 const FOUNDER_USERNAME = 'AMBHaggermaker';
 
@@ -214,7 +214,8 @@ router.post('/login', async (req, res, next) => {
     }
 
     const result = await pool.query(
-      `SELECT id, username, email, role, password_hash, bio, location, reliability_score, avatar_url, created_at, is_active
+      `SELECT id, username, email, role, password_hash, bio, location, reliability_score, avatar_url,
+              verified, founding_member, email_pending, created_at, is_active
        FROM users WHERE email = $1`,
       [email.toLowerCase().trim()]
     );
@@ -369,6 +370,74 @@ router.delete('/request-email-change', authenticate, async (req, res, next) => {
        WHERE id = $1`,
       [req.user.id]
     );
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/auth/forgot-password  (public)
+router.post('/forgot-password', async (req, res, next) => {
+  try {
+    const email = req.body.email?.toLowerCase().trim();
+    if (!email) return res.status(400).json({ error: 'email is required' });
+
+    // Always respond 200 to avoid email enumeration
+    const result = await pool.query(
+      `SELECT id, username FROM users WHERE email = $1 AND is_active = TRUE`,
+      [email]
+    );
+    if (result.rows[0]) {
+      const { id, username } = result.rows[0];
+      const resetToken  = crypto.randomUUID();
+      const expiresAt   = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+      await pool.query(
+        `UPDATE users SET reset_token = $1, reset_expires_at = $2 WHERE id = $3`,
+        [resetToken, expiresAt, id]
+      );
+
+      passwordResetEmail({ username, resetToken, toEmail: email }).catch(e => {
+        console.error('[forgot-password] email failed:', e.message);
+      });
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/auth/reset-password  (public — uses token from email)
+router.post('/reset-password', async (req, res, next) => {
+  try {
+    const { token, new_password } = req.body;
+    if (!token || !new_password) {
+      return res.status(400).json({ error: 'token and new_password are required' });
+    }
+    if (new_password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+
+    const result = await pool.query(
+      `SELECT id, username, email, reset_expires_at FROM users WHERE reset_token = $1 AND is_active = TRUE`,
+      [token]
+    );
+    if (!result.rows[0]) {
+      return res.status(400).json({ error: 'Invalid or already-used reset link' });
+    }
+    const { id, username, email, reset_expires_at } = result.rows[0];
+    if (new Date(reset_expires_at) < new Date()) {
+      return res.status(410).json({ error: 'This reset link has expired. Please request a new one.' });
+    }
+
+    const hash = await bcrypt.hash(new_password, 12);
+    await pool.query(
+      `UPDATE users SET password_hash = $1, reset_token = NULL, reset_expires_at = NULL, updated_at = NOW()
+       WHERE id = $2`,
+      [hash, id]
+    );
+
     res.json({ ok: true });
   } catch (err) {
     next(err);
