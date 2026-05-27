@@ -66,7 +66,7 @@ router.get('/users', requireRole('admin'), async (req, res, next) => {
   try {
     const result = await pool.query(
       `SELECT id, username, email, role, reliability_score, is_active, deleted_at, created_at,
-              original_username, preserved_display_name,
+              original_username, preserved_display_name, founding_member,
               (SELECT COUNT(*)::int FROM posts WHERE user_id = users.id) AS post_count,
               (SELECT COUNT(*)::int FROM post_reports pr JOIN posts p ON p.id = pr.post_id WHERE p.user_id = users.id) AS flag_count
        FROM users
@@ -184,6 +184,31 @@ router.patch('/users/:userId/role', requireRole('admin'), async (req, res, next)
     const result = await pool.query(
       'UPDATE users SET role = $1 WHERE id = $2 RETURNING id, username, role',
       [role, req.params.userId]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/admin/users/:userId/founding-member  — grant or revoke founding member status
+router.patch('/users/:userId/founding-member', requireRole('admin'), async (req, res, next) => {
+  try {
+    const { grant } = req.body; // true = grant, false = revoke
+    if (typeof grant !== 'boolean') {
+      return res.status(400).json({ error: 'grant must be true or false' });
+    }
+
+    const target = await pool.query('SELECT username FROM users WHERE id = $1', [req.params.userId]);
+    if (!target.rows[0]) return res.status(404).json({ error: 'User not found' });
+
+    if (!grant && target.rows[0].username === 'AMBHaggermaker') {
+      return res.status(403).json({ error: 'The founding account founding member status cannot be revoked' });
+    }
+
+    const result = await pool.query(
+      'UPDATE users SET founding_member = $1 WHERE id = $2 RETURNING id, username, founding_member',
+      [grant, req.params.userId]
     );
     res.json(result.rows[0]);
   } catch (err) {
