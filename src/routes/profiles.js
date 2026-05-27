@@ -401,8 +401,8 @@ router.get('/:username/boards', async (req, res, next) => {
 
     // Timeline (last 30 activities)
     const timelineResult = await pool.query(
-      `(SELECT 'post' AS activity_type, id AS ref_id, title AS label, type AS sub_type,
-               NULL AS detail, created_at
+      `(SELECT 'post' AS activity_type, id AS ref_id, title AS label, type::text AS sub_type,
+               NULL::text AS detail, created_at
         FROM posts WHERE user_id = $1 AND status != 'cancelled' ORDER BY created_at DESC LIMIT 15)
        UNION ALL
        (SELECT 'circle_join', c.id, c.name, NULL, NULL, cm.joined_at
