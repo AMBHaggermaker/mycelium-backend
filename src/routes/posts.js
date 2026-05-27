@@ -108,7 +108,10 @@ router.get('/', async (req, res, next) => {
       ? `LEFT JOIN post_rsvps my_rsvp ON my_rsvp.post_id = p.id AND my_rsvp.user_id = '${authUserId}'`
       : '';
     const rsvpSelect = authUserId ? `, my_rsvp.status AS my_rsvp` : '';
-    const rsvpCountSelect = `, (SELECT COUNT(*) FROM post_rsvps r WHERE r.post_id = p.id AND r.status = 'going')::int AS rsvp_going_count`;
+    const rsvpCountSelect = `
+      , (SELECT COUNT(*) FROM post_rsvps r WHERE r.post_id = p.id AND r.status = 'going')::int      AS rsvp_going_count
+      , (SELECT COUNT(*) FROM post_rsvps r WHERE r.post_id = p.id AND r.status = 'interested')::int AS rsvp_interested_count
+      , (SELECT COUNT(*) FROM post_rsvps r WHERE r.post_id = p.id AND r.status = 'saved')::int      AS rsvp_saved_count`;
 
     const result = await pool.query(
       `SELECT p.*, u.username, u.reliability_score, u.verified AS author_verified,
@@ -195,7 +198,10 @@ router.get('/:id', async (req, res, next) => {
     const result = await pool.query(
       `SELECT p.*, u.username, u.reliability_score, u.verified AS author_verified,
               u.founding_member AS author_founding_member, u.bio AS author_bio,
-              u.avatar_url AS author_avatar_url, c.name AS circle_name, ${MEDIA_SQL}
+              u.avatar_url AS author_avatar_url, c.name AS circle_name, ${MEDIA_SQL},
+              (SELECT COUNT(*) FROM post_rsvps r WHERE r.post_id = p.id AND r.status = 'going')::int      AS rsvp_going_count,
+              (SELECT COUNT(*) FROM post_rsvps r WHERE r.post_id = p.id AND r.status = 'interested')::int AS rsvp_interested_count,
+              (SELECT COUNT(*) FROM post_rsvps r WHERE r.post_id = p.id AND r.status = 'saved')::int      AS rsvp_saved_count
        FROM posts p
        JOIN users u ON u.id = p.user_id
        LEFT JOIN circles c ON c.id = p.circle_id
