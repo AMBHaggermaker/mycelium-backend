@@ -54,7 +54,7 @@ router.get('/:username', async (req, res, next) => {
        FROM circles c
        JOIN circle_members cm ON cm.circle_id = c.id AND cm.user_id = $1
        LEFT JOIN circle_members m ON m.circle_id = c.id
-       GROUP BY c.id, cm.role
+       GROUP BY c.id, cm.role, cm.joined_at
        ORDER BY cm.joined_at DESC LIMIT 20`,
       [u.id]
     );
