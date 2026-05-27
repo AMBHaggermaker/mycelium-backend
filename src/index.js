@@ -38,6 +38,7 @@ app.use('/api/invitations',  require('./routes/invitations'));
 app.use('/api/advocate',     require('./routes/advocate'));
 app.use('/api/messages',     require('./routes/messages'));
 app.use('/api/schools',      require('./routes/schools'));
+app.use('/api/profiles',     require('./routes/profiles'));
 
 app.get('/api/health', async (req, res) => {
   try {
