@@ -65,15 +65,83 @@ router.delete('/moderation/:postId', requireRole('moderator', 'admin'), async (r
 router.get('/users', requireRole('admin'), async (req, res, next) => {
   try {
     const result = await pool.query(
-      `SELECT id, username, email, role, reliability_score, is_active, deleted_at, created_at,
-              original_username, preserved_display_name, founding_member,
-              covenant_agreed, covenant_agreed_at,
-              (SELECT COUNT(*)::int FROM posts WHERE user_id = users.id) AS post_count,
-              (SELECT COUNT(*)::int FROM post_reports pr JOIN posts p ON p.id = pr.post_id WHERE p.user_id = users.id) AS flag_count
-       FROM users
-       ORDER BY is_active DESC, created_at ASC`
+      `SELECT u.id, u.username, u.email, u.role, u.reliability_score, u.is_active, u.deleted_at,
+              u.created_at, u.updated_at AS last_active,
+              u.location, u.how_found, u.verified,
+              u.original_username, u.preserved_display_name, u.founding_member,
+              u.covenant_agreed, u.covenant_agreed_at,
+              inv_user.username  AS inviter_username,
+              (SELECT COUNT(*)::int FROM posts WHERE user_id = u.id) AS post_count,
+              (SELECT COUNT(*)::int FROM post_reports pr JOIN posts p ON p.id = pr.post_id WHERE p.user_id = u.id) AS flag_count
+       FROM users u
+       LEFT JOIN vouches vc ON vc.vouched_id = u.id
+       LEFT JOIN users inv_user ON inv_user.id = vc.voucher_id
+       ORDER BY u.is_active DESC, u.created_at ASC`
     );
     res.json(result.rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/admin/users/:userId/profile — full profile summary for side panel
+router.get('/users/:userId/profile', requireRole('admin'), async (req, res, next) => {
+  try {
+    const uid = req.params.userId;
+
+    const [userRes, circlesRes, postsRes, chainRes] = await Promise.all([
+      pool.query(
+        `SELECT u.id, u.username, u.email, u.bio, u.location, u.how_found,
+                u.verified, u.founding_member, u.covenant_agreed, u.covenant_agreed_at,
+                u.created_at, u.updated_at AS last_active, u.avatar_url,
+                u.reliability_score, u.role, u.is_veteran, u.veteran_confirmed,
+                inv_user.username AS inviter_username
+         FROM users u
+         LEFT JOIN vouches vc ON vc.vouched_id = u.id
+         LEFT JOIN users inv_user ON inv_user.id = vc.voucher_id
+         WHERE u.id = $1`,
+        [uid]
+      ),
+      pool.query(
+        `SELECT c.id, c.name, c.circle_type, cm.role, cm.joined_at
+         FROM circle_members cm
+         JOIN circles c ON c.id = cm.circle_id
+         WHERE cm.user_id = $1
+         ORDER BY cm.joined_at ASC`,
+        [uid]
+      ),
+      pool.query(
+        `SELECT id, title, type, status, created_at, content
+         FROM posts
+         WHERE user_id = $1
+         ORDER BY created_at DESC
+         LIMIT 10`,
+        [uid]
+      ),
+      pool.query(
+        `WITH RECURSIVE chain(user_id, username, depth) AS (
+           SELECT u.id, u.username, 0
+           FROM users u WHERE u.id = $1
+           UNION ALL
+           SELECT v.voucher_id, u.username, c.depth + 1
+           FROM chain c
+           JOIN vouches v ON v.vouched_id = c.user_id
+           JOIN users u ON u.id = v.voucher_id
+           WHERE c.depth < 20
+         )
+         SELECT user_id AS id, username, depth FROM chain ORDER BY depth`,
+        [uid]
+      ),
+    ]);
+
+    if (!userRes.rows[0]) return res.status(404).json({ error: 'User not found' });
+
+    res.json({
+      user:         userRes.rows[0],
+      circles:      circlesRes.rows,
+      posts:        postsRes.rows,
+      vouch_chain:  chainRes.rows,
+    });
   } catch (err) {
     next(err);
   }
