@@ -89,14 +89,17 @@ router.post('/register', async (req, res, next) => {
 
     const hash = await bcrypt.hash(password, 12);
     const isVerified = !!invitation;
+    const agreedToCovenant = !!req.body.covenant_agreed;
 
     const result = await pool.query(
-      `INSERT INTO users (username, email, password_hash, bio, location, verified, how_found)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO users (username, email, password_hash, bio, location, verified, how_found,
+                          covenant_agreed, covenant_agreed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING id, username, email, role, bio, location, reliability_score, verified,
-                 founding_member, created_at`,
+                 founding_member, covenant_agreed, covenant_agreed_at, created_at`,
       [username.trim(), emailClean, hash,
-       bio || null, location?.trim() || null, isVerified, how_found || null]
+       bio || null, location?.trim() || null, isVerified, how_found || null,
+       agreedToCovenant, agreedToCovenant ? new Date() : null]
     );
     const user = result.rows[0];
 

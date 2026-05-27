@@ -42,7 +42,8 @@ router.get('/:username', async (req, res, next) => {
               background_color, background_gradient, accent_color,
               font_style, layout, banner_image_url, profile_theme,
               pinned_bulletin, bulletin_updated_at, interests,
-              is_veteran, veteran_confirmed
+              is_veteran, veteran_confirmed,
+              covenant_agreed, covenant_agreed_at
        FROM users
        WHERE lower(username) = lower($1) AND deleted_at IS NULL`,
       [req.params.username]

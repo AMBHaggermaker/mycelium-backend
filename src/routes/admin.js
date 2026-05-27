@@ -67,6 +67,7 @@ router.get('/users', requireRole('admin'), async (req, res, next) => {
     const result = await pool.query(
       `SELECT id, username, email, role, reliability_score, is_active, deleted_at, created_at,
               original_username, preserved_display_name, founding_member,
+              covenant_agreed, covenant_agreed_at,
               (SELECT COUNT(*)::int FROM posts WHERE user_id = users.id) AS post_count,
               (SELECT COUNT(*)::int FROM post_reports pr JOIN posts p ON p.id = pr.post_id WHERE p.user_id = users.id) AS flag_count
        FROM users
@@ -338,6 +339,24 @@ router.delete('/watch-anomalies/:id', requireRole('admin'), async (req, res, nex
     );
     if (!result.rows[0]) return res.status(404).json({ error: 'Anomaly not found' });
     res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/admin/users/:userId/covenant-agreed — mark covenant agreed for a user (admin only)
+router.patch('/users/:userId/covenant-agreed', requireRole('admin'), async (req, res, next) => {
+  try {
+    const target = await pool.query('SELECT id, username FROM users WHERE id = $1', [req.params.userId]);
+    if (!target.rows[0]) return res.status(404).json({ error: 'User not found' });
+
+    const result = await pool.query(
+      `UPDATE users SET covenant_agreed = TRUE, covenant_agreed_at = NOW()
+       WHERE id = $1
+       RETURNING id, username, covenant_agreed, covenant_agreed_at`,
+      [req.params.userId]
+    );
+    res.json(result.rows[0]);
   } catch (err) {
     next(err);
   }

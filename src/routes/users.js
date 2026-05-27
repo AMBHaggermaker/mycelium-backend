@@ -268,4 +268,27 @@ router.patch('/:id/declare-veteran', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// PATCH /api/users/me/covenant — record covenant agreement for the logged-in user
+router.patch('/me/covenant', authenticate, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `UPDATE users SET covenant_agreed = TRUE, covenant_agreed_at = NOW()
+       WHERE id = $1 AND covenant_agreed = FALSE
+       RETURNING id, covenant_agreed, covenant_agreed_at`,
+      [req.user.id]
+    );
+    if (!result.rows[0]) {
+      // Already agreed — fetch current values
+      const existing = await pool.query(
+        'SELECT id, covenant_agreed, covenant_agreed_at FROM users WHERE id = $1',
+        [req.user.id]
+      );
+      return res.json(existing.rows[0]);
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
