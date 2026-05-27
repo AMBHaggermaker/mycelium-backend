@@ -12,9 +12,6 @@ const r2 = new S3Client({
 });
 
 const BUCKET = process.env.R2_BUCKET;
-// Construct public base URL: https://{bucket}.{account-id}.r2.cloudflarestorage.com
-const PUBLIC_BASE = process.env.R2_PUBLIC_URL ||
-  `https://${BUCKET}.${process.env.R2_ENDPOINT.replace('https://', '')}`;
 
 async function uploadToR2(buffer, originalName, folder = 'media') {
   const ext  = path.extname(originalName).toLowerCase() || '.bin';
@@ -28,13 +25,23 @@ async function uploadToR2(buffer, originalName, folder = 'media') {
     ContentType: mime,
   }));
 
-  return `${PUBLIC_BASE}/${key}`;
+  // Return a proxy path served by /api/media — no public bucket access needed.
+  return `/api/media/${key}`;
 }
 
 async function deleteFromR2(url) {
   try {
-    const key = url.replace(`${PUBLIC_BASE}/`, '');
-    if (!key || key === url) return; // not an R2 URL
+    // Accept both /api/media/key and legacy https://...r2.cloudflarestorage.com/key
+    let key;
+    if (url.startsWith('/api/media/')) {
+      key = url.replace('/api/media/', '');
+    } else {
+      // legacy: extract key after bucket hostname
+      const match = url.match(/r2\.cloudflarestorage\.com\/(.+)$/);
+      if (!match) return;
+      key = match[1];
+    }
+    if (!key) return;
     await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
   } catch (e) {
     console.error('[r2] delete failed:', e.message);
