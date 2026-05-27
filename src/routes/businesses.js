@@ -121,7 +121,7 @@ router.get('/:id', async (req, res, next) => {
               u.verified AS owner_verified, u.founding_member AS owner_founding
        FROM businesses b
        JOIN users u ON u.id = b.owner_id
-       WHERE b.id = $1 AND b.is_active = TRUE`,
+       WHERE b.id = $1`,
       [req.params.id]
     );
     if (!bizRes.rows[0]) return res.status(404).json({ error: 'Business not found' });
@@ -195,15 +195,18 @@ router.patch('/:id', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// DELETE /api/businesses/:id (soft-deactivate)
+// DELETE /api/businesses/:id (soft-deactivate, owner only)
 router.delete('/:id', authenticate, async (req, res, next) => {
   try {
     const biz = await pool.query('SELECT owner_id FROM businesses WHERE id = $1', [req.params.id]);
     if (!biz.rows[0]) return res.status(404).json({ error: 'Business not found' });
-    if (biz.rows[0].owner_id !== req.user.id && req.user.role !== 'admin') {
+    if (biz.rows[0].owner_id !== req.user.id) {
       return res.status(403).json({ error: 'Forbidden' });
     }
-    await pool.query('UPDATE businesses SET is_active = FALSE WHERE id = $1', [req.params.id]);
+    await pool.query(
+      'UPDATE businesses SET is_active = FALSE, deleted_at = NOW(), deleted_by = $1 WHERE id = $2',
+      [req.user.id, req.params.id]
+    );
     res.status(204).end();
   } catch (err) { next(err); }
 });

@@ -44,10 +44,10 @@ router.get('/', async (req, res, next) => {
 // POST /api/circles
 router.post('/', authenticate, async (req, res, next) => {
   try {
-    const { name, description, is_private, circle_type } = req.body;
+    const { name, description, is_private, circle_type, location_type, grade_levels, learning_styles } = req.body;
     if (!name) return res.status(400).json({ error: 'name is required' });
 
-    const VALID_CIRCLE_TYPES = ['veteran_circle','homeschool_co_op','first_responder'];
+    const VALID_CIRCLE_TYPES = ['veteran_circle','homeschool_co_op','homeschool_circle','first_responder'];
     if (circle_type && !VALID_CIRCLE_TYPES.includes(circle_type)) {
       return res.status(400).json({ error: 'Invalid circle_type' });
     }
@@ -56,15 +56,31 @@ router.post('/', authenticate, async (req, res, next) => {
     try {
       await client.query('BEGIN');
       const circleResult = await client.query(
-        `INSERT INTO circles (name, description, created_by, is_private, circle_type)
-         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-        [name.trim(), description || null, req.user.id, is_private || false, circle_type || null]
+        `INSERT INTO circles (name, description, created_by, is_private, circle_type, location_type, grade_levels, learning_styles)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+        [name.trim(), description || null, req.user.id, is_private || false, circle_type || null,
+         location_type || null,
+         grade_levels   ? JSON.stringify(grade_levels)    : '[]',
+         learning_styles? JSON.stringify(learning_styles) : '[]']
       );
       const circle = circleResult.rows[0];
       await client.query(
         `INSERT INTO circle_members (circle_id, user_id, role) VALUES ($1, $2, 'admin')`,
         [circle.id, req.user.id]
       );
+
+      // Homeschool circles automatically get a dedicated chat room
+      if (circle_type === 'homeschool_circle') {
+        const slug = name.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').slice(0, 60);
+        const uniqueSlug = `hs-${slug}`;
+        await client.query(
+          `INSERT INTO chat_rooms (name, slug, description, created_by, is_public, room_type, circle_id)
+           VALUES ($1, $2, $3, $4, TRUE, 'homeschool', $5)
+           ON CONFLICT (slug) DO NOTHING`,
+          [name.trim(), uniqueSlug, description || null, req.user.id, circle.id]
+        );
+      }
+
       await client.query('COMMIT');
       res.status(201).json(circle);
     } catch (err) {

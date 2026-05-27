@@ -349,6 +349,7 @@ router.delete('/watch-anomalies/:id', requireRole('admin'), async (req, res, nex
 // GET /api/admin/businesses
 router.get('/businesses', requireRole('admin'), async (req, res, next) => {
   try {
+    const showDeleted = req.query.show_deleted === 'true';
     const result = await pool.query(
       `SELECT b.*, u.username AS owner_username,
               (SELECT COUNT(CASE WHEN tm.parent_id IS NULL THEN 1 END)::int
@@ -356,9 +357,23 @@ router.get('/businesses', requireRole('admin'), async (req, res, next) => {
                WHERE t.business_id = b.id) AS recommendation_count
        FROM businesses b
        JOIN users u ON u.id = b.owner_id
+       ${showDeleted ? '' : 'WHERE b.is_active = TRUE'}
        ORDER BY b.is_verified_local ASC, b.is_active DESC, b.created_at DESC`
     );
     res.json(result.rows);
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/businesses/:id/deactivate
+router.patch('/businesses/:id/deactivate', requireRole('admin'), async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `UPDATE businesses SET is_active = FALSE, deleted_at = NOW(), deleted_by = $1
+       WHERE id = $2 RETURNING id, business_name, is_active, deleted_at`,
+      [req.user.id, req.params.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Business not found' });
+    res.json(result.rows[0]);
   } catch (err) { next(err); }
 });
 
