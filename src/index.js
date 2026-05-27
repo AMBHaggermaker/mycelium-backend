@@ -19,6 +19,9 @@ const io = new Server(httpServer, {
   transports: ['polling', 'websocket'],
 });
 
+// Make io available to routes via lib/io
+require('./lib/io').set(io);
+
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
@@ -39,6 +42,7 @@ app.use('/api/advocate',     require('./routes/advocate'));
 app.use('/api/messages',     require('./routes/messages'));
 app.use('/api/schools',      require('./routes/schools'));
 app.use('/api/profiles',     require('./routes/profiles'));
+app.use('/api/activity',     require('./routes/activity'));
 
 app.get('/api/health', async (req, res) => {
   try {
@@ -79,9 +83,11 @@ function getRoomCounts() {
 
 io.on('connection', (socket) => {
   const user = socket.user;
+  const ioLib = require('./lib/io');
 
   // Join personal room for DM delivery
   socket.join(`user:${user.id}`);
+  ioLib.incConnected();
 
   socket.on('join_room', (slug) => {
     socket.join(`room:${slug}`);
@@ -158,12 +164,14 @@ io.on('connection', (socket) => {
         room_slug,
       });
       io.emit('room_list_update', { counts: getRoomCounts(), lastActivity });
+      ioLib.networkActivity('chat_message', { room_name: room_slug, slug: room_slug }, 'normal');
     } catch (e) {
       console.error('chat_message socket error:', e.message);
     }
   });
 
   socket.on('disconnect', () => {
+    ioLib.decConnected();
     for (const [slug, presenceMap] of Object.entries(roomPresence)) {
       if (presenceMap.has(socket.id)) {
         presenceMap.delete(socket.id);

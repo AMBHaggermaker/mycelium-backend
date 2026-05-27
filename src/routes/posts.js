@@ -3,8 +3,12 @@ const multer  = require('multer');
 const path    = require('path');
 const fs      = require('fs');
 const crypto  = require('crypto');
+const jwt     = require('jsonwebtoken');
 const pool    = require('../db');
 const authenticate = require('../middleware/auth');
+const ioLib   = require('../lib/io');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'mycelium_jwt_secret_change_in_production';
 
 const router = express.Router();
 
@@ -66,6 +70,13 @@ const SORT_ORDER = {
 
 // GET /api/posts
 router.get('/', async (req, res, next) => {
+  // Optional auth — include user's RSVP status on event posts if logged in
+  let authUserId = null;
+  try {
+    const hdr = req.headers.authorization?.split(' ')[1];
+    if (hdr) authUserId = jwt.verify(hdr, JWT_SECRET).id;
+  } catch { /* unauthenticated */ }
+
   try {
     const { type, circle_id, status, tags, category, subcategory, sort = 'recent', page = 1, limit = 20, feed_tab, commerce_type: ctFilter } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
@@ -93,14 +104,23 @@ router.get('/', async (req, res, next) => {
     const orderBy = SORT_ORDER[sort] || SORT_ORDER.recent;
     params.push(parseInt(limit), offset);
 
+    const rsvpJoin = authUserId
+      ? `LEFT JOIN post_rsvps my_rsvp ON my_rsvp.post_id = p.id AND my_rsvp.user_id = '${authUserId}'`
+      : '';
+    const rsvpSelect = authUserId ? `, my_rsvp.status AS my_rsvp` : '';
+    const rsvpCountSelect = `, (SELECT COUNT(*) FROM post_rsvps r WHERE r.post_id = p.id AND r.status = 'going')::int AS rsvp_going_count`;
+
     const result = await pool.query(
       `SELECT p.*, u.username, u.reliability_score, u.verified AS author_verified,
               u.founding_member, c.name AS circle_name,
               ${PRIORITY_SCORE_SQL} AS priority_score,
               ${MEDIA_SQL}
+              ${rsvpCountSelect}
+              ${rsvpSelect}
        FROM posts p
        JOIN users u ON u.id = p.user_id
        LEFT JOIN circles c ON c.id = p.circle_id
+       ${rsvpJoin}
        ${where}
        ORDER BY ${orderBy}
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
@@ -154,7 +174,16 @@ router.post('/', authenticate, async (req, res, next) => {
        userUrgent, autoUrgent, expires_at || null, resolvedCommerceType,
        price != null ? parseFloat(price) : null]
     );
-    res.status(201).json(result.rows[0]);
+    const p = result.rows[0];
+    ioLib.networkActivity('new_post', {
+      title:    p.title,
+      type:     p.type,
+      category: p.category,
+      location: p.location,
+      username: req.user.username,
+    }, (p.auto_urgent || p.is_urgent) ? 'urgent' : 'normal');
+
+    res.status(201).json(p);
   } catch (err) {
     next(err);
   }
@@ -390,6 +419,73 @@ router.delete('/:id/media/:mediaId', authenticate, async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+// ── RSVP ─────────────────────────────────────────────────────────────────────
+
+// GET /api/posts/:id/rsvp — current user's RSVP for this post
+router.get('/:id/rsvp', authenticate, async (req, res, next) => {
+  try {
+    const r = await pool.query(
+      'SELECT status FROM post_rsvps WHERE post_id = $1 AND user_id = $2',
+      [req.params.id, req.user.id]
+    );
+    res.json({ status: r.rows[0]?.status || null });
+  } catch (err) { next(err); }
+});
+
+// POST /api/posts/:id/rsvp — upsert RSVP
+router.post('/:id/rsvp', authenticate, async (req, res, next) => {
+  try {
+    const { status } = req.body;
+    if (!['going', 'interested', 'saved'].includes(status)) {
+      return res.status(400).json({ error: 'status must be going, interested, or saved' });
+    }
+    const post = await pool.query(
+      `SELECT id, title, type FROM posts WHERE id = $1 AND status = 'active'`,
+      [req.params.id]
+    );
+    if (!post.rows[0]) return res.status(404).json({ error: 'Post not found' });
+
+    const r = await pool.query(
+      `INSERT INTO post_rsvps (post_id, user_id, status)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (post_id, user_id) DO UPDATE SET status = $3, created_at = NOW()
+       RETURNING *`,
+      [req.params.id, req.user.id, status]
+    );
+
+    const counts = await pool.query(
+      `SELECT status, COUNT(*)::int FROM post_rsvps WHERE post_id = $1 GROUP BY status`,
+      [req.params.id]
+    );
+    const countMap = Object.fromEntries(counts.rows.map(c => [c.status, c.count]));
+
+    if (status === 'going' && post.rows[0].type === 'event') {
+      ioLib.networkActivity('rsvp', {
+        event_title: post.rows[0].title,
+        status,
+      }, 'normal');
+    }
+
+    res.json({ rsvp: r.rows[0], counts: countMap });
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/posts/:id/rsvp — remove RSVP
+router.delete('/:id/rsvp', authenticate, async (req, res, next) => {
+  try {
+    await pool.query(
+      'DELETE FROM post_rsvps WHERE post_id = $1 AND user_id = $2',
+      [req.params.id, req.user.id]
+    );
+    const counts = await pool.query(
+      `SELECT status, COUNT(*)::int FROM post_rsvps WHERE post_id = $1 GROUP BY status`,
+      [req.params.id]
+    );
+    const countMap = Object.fromEntries(counts.rows.map(c => [c.status, c.count]));
+    res.json({ rsvp: null, counts: countMap });
+  } catch (err) { next(err); }
 });
 
 module.exports = router;

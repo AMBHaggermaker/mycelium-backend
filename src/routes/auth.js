@@ -115,6 +115,10 @@ router.post('/register', async (req, res, next) => {
       }
     }
 
+    require('../lib/io').networkActivity('new_member', {
+      username: user.username,
+      location: user.location,
+    }, 'success');
     res.status(201).json({ token: signToken(user), user, via_invite: !!invitation });
   } catch (err) {
     if (err.code === '23505') {

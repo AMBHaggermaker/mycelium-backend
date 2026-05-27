@@ -1,8 +1,24 @@
 const express    = require('express');
 const multer     = require('multer');
+const jwt        = require('jsonwebtoken');
 const pool       = require('../db');
 const authenticate   = require('../middleware/auth');
 const { uploadToR2, deleteFromR2 } = require('../lib/r2');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'mycelium_jwt_secret_change_in_production';
+
+const DEFAULT_BOARDS = [
+  { board_type: 'bulletin',    position: 0 },
+  { board_type: 'timeline',    position: 1 },
+  { board_type: 'posts',       position: 2 },
+  { board_type: 'events',      position: 3 },
+  { board_type: 'photos',      position: 4 },
+  { board_type: 'circles',     position: 5 },
+  { board_type: 'people',      position: 6 },
+  { board_type: 'invitations', position: 7 },
+  { board_type: 'messages',    position: 8 },
+  { board_type: 'chats',       position: 9 },
+];
 
 const router = express.Router();
 
@@ -334,6 +350,136 @@ router.post('/:username/wall', authenticate, async (req, res, next) => {
       author_username: req.user.username,
       author_verified: false,
     });
+  } catch (err) { next(err); }
+});
+
+// ── GET /api/profiles/:username/boards ───────────────────────────────────────
+
+router.get('/:username/boards', async (req, res, next) => {
+  try {
+    // Optional auth for owner-only boards
+    let authUserId = null;
+    try {
+      const hdr = req.headers.authorization?.split(' ')[1];
+      if (hdr) authUserId = jwt.verify(hdr, JWT_SECRET).id;
+    } catch { /* unauthenticated */ }
+
+    const uResult = await pool.query(
+      'SELECT id FROM users WHERE lower(username) = lower($1) AND deleted_at IS NULL',
+      [req.params.username]
+    );
+    if (!uResult.rows[0]) return res.status(404).json({ error: 'User not found' });
+    const userId = uResult.rows[0].id;
+    const isOwner = authUserId === userId;
+
+    // Board settings
+    const settingsResult = await pool.query(
+      'SELECT board_type, position, is_visible, background_color, font_color FROM profile_board_settings WHERE user_id = $1 ORDER BY position ASC',
+      [userId]
+    );
+    const savedSettings = settingsResult.rows;
+    // Merge with defaults — any board not saved uses default
+    const settingsMap = Object.fromEntries(savedSettings.map(s => [s.board_type, s]));
+    const settings = DEFAULT_BOARDS.map(d => ({
+      ...d, is_visible: true, background_color: null, font_color: null,
+      ...settingsMap[d.board_type],
+    })).sort((a, b) => a.position - b.position);
+
+    // RSVP events (going / interested / saved)
+    const rsvpResult = await pool.query(
+      `SELECT p.id, p.title, p.type, p.starts_at, p.ends_at, p.location,
+              u2.username AS author_username,
+              rsvp.status AS rsvp_status, rsvp.created_at AS rsvped_at,
+              (SELECT COUNT(*)::int FROM post_rsvps r WHERE r.post_id = p.id AND r.status = 'going') AS rsvp_going_count
+       FROM post_rsvps rsvp
+       JOIN posts p ON p.id = rsvp.post_id
+       JOIN users u2 ON u2.id = p.user_id
+       WHERE rsvp.user_id = $1 AND p.type = 'event'
+       ORDER BY p.starts_at DESC NULLS LAST`,
+      [userId]
+    );
+
+    // Timeline (last 30 activities)
+    const timelineResult = await pool.query(
+      `(SELECT 'post' AS activity_type, id AS ref_id, title AS label, type AS sub_type,
+               NULL AS detail, created_at
+        FROM posts WHERE user_id = $1 AND status != 'cancelled' ORDER BY created_at DESC LIMIT 15)
+       UNION ALL
+       (SELECT 'circle_join', c.id, c.name, NULL, NULL, cm.joined_at
+        FROM circle_members cm
+        JOIN circles c ON c.id = cm.circle_id
+        WHERE cm.user_id = $1 ORDER BY cm.joined_at DESC LIMIT 10)
+       UNION ALL
+       (SELECT 'rsvp', p.id, p.title, rsvp.status, NULL, rsvp.created_at
+        FROM post_rsvps rsvp
+        JOIN posts p ON p.id = rsvp.post_id
+        WHERE rsvp.user_id = $1 ORDER BY rsvp.created_at DESC LIMIT 10)
+       ORDER BY created_at DESC LIMIT 30`,
+      [userId]
+    );
+
+    // Owner-only: recent message conversations
+    let recentMessages = [];
+    if (isOwner) {
+      const msgResult = await pool.query(
+        `SELECT DISTINCT ON (LEAST(m.sender_id, m.recipient_id), GREATEST(m.sender_id, m.recipient_id))
+                m.content AS last_message, m.created_at AS last_message_at, m.read,
+                CASE WHEN m.sender_id = $1 THEN m.recipient_id ELSE m.sender_id END AS other_id,
+                u2.username AS other_username
+         FROM messages m
+         JOIN users u2 ON u2.id = CASE WHEN m.sender_id = $1 THEN m.recipient_id ELSE m.sender_id END
+         WHERE m.sender_id = $1 OR m.recipient_id = $1
+         ORDER BY LEAST(m.sender_id, m.recipient_id), GREATEST(m.sender_id, m.recipient_id),
+                  m.created_at DESC
+         LIMIT 5`,
+        [userId]
+      );
+      recentMessages = msgResult.rows;
+    }
+
+    // Owner-only: recent chat activity
+    let recentChats = [];
+    if (isOwner) {
+      const chatResult = await pool.query(
+        `SELECT cr.name AS room_name, cr.slug, cm.content, cm.created_at
+         FROM chat_messages cm
+         JOIN chat_rooms cr ON cr.id = cm.room_id
+         WHERE cm.user_id = $1
+         ORDER BY cm.created_at DESC LIMIT 5`,
+        [userId]
+      );
+      recentChats = chatResult.rows;
+    }
+
+    res.json({
+      settings,
+      rsvp_events:     rsvpResult.rows,
+      timeline:        timelineResult.rows,
+      recent_messages: recentMessages,
+      recent_chats:    recentChats,
+    });
+  } catch (err) { next(err); }
+});
+
+// ── PATCH /api/profiles/boards/settings ──────────────────────────────────────
+
+router.patch('/boards/settings', authenticate, async (req, res, next) => {
+  try {
+    const { boards } = req.body;
+    if (!Array.isArray(boards)) return res.status(400).json({ error: 'boards array required' });
+
+    for (const b of boards) {
+      if (!b.board_type) continue;
+      await pool.query(
+        `INSERT INTO profile_board_settings (user_id, board_type, position, is_visible, background_color, font_color)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (user_id, board_type) DO UPDATE
+           SET position = $3, is_visible = $4, background_color = $5, font_color = $6`,
+        [req.user.id, b.board_type, b.position ?? 0, b.is_visible ?? true,
+         b.background_color || null, b.font_color || null]
+      );
+    }
+    res.json({ saved: true });
   } catch (err) { next(err); }
 });
 
