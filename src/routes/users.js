@@ -196,4 +196,76 @@ router.get('/:id/reservations', authenticate, async (req, res, next) => {
   }
 });
 
+// POST /api/users/:id/vouch-veteran  (vouch that this user is a veteran)
+router.post('/:id/vouch-veteran', authenticate, async (req, res, next) => {
+  try {
+    if (req.params.id === req.user.id) {
+      return res.status(400).json({ error: 'You cannot vouch for yourself' });
+    }
+
+    // Voucher must be a verified member
+    const voucher = await pool.query(
+      'SELECT id, verified, founding_member FROM users WHERE id = $1',
+      [req.user.id]
+    );
+    if (!voucher.rows[0]?.verified && !voucher.rows[0]?.founding_member) {
+      return res.status(403).json({ error: 'Only verified members can vouch for veterans' });
+    }
+
+    // Target must exist and have declared veteran status
+    const veteran = await pool.query(
+      'SELECT id, is_veteran, veteran_confirmed FROM users WHERE id = $1',
+      [req.params.id]
+    );
+    if (!veteran.rows[0]) return res.status(404).json({ error: 'User not found' });
+    if (!veteran.rows[0].is_veteran) {
+      return res.status(400).json({ error: 'This user has not declared veteran status' });
+    }
+    if (veteran.rows[0].veteran_confirmed) {
+      return res.status(400).json({ error: 'Veteran status is already confirmed' });
+    }
+
+    await pool.query(
+      `INSERT INTO veteran_vouches (veteran_user_id, voucher_user_id)
+       VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+      [req.params.id, req.user.id]
+    );
+
+    // Count vouches; confirm if >= 2
+    const countResult = await pool.query(
+      'SELECT COUNT(*)::int AS cnt FROM veteran_vouches WHERE veteran_user_id = $1',
+      [req.params.id]
+    );
+    const count = countResult.rows[0].cnt;
+    if (count >= 2) {
+      await pool.query(
+        'UPDATE users SET veteran_confirmed = true, veteran_confirmed_count = $1 WHERE id = $2',
+        [count, req.params.id]
+      );
+    } else {
+      await pool.query(
+        'UPDATE users SET veteran_confirmed_count = $1 WHERE id = $2',
+        [count, req.params.id]
+      );
+    }
+
+    res.json({ vouched: true, vouch_count: count, confirmed: count >= 2 });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/users/:id/declare-veteran  (declare own veteran status)
+router.patch('/:id/declare-veteran', authenticate, async (req, res, next) => {
+  try {
+    if (req.params.id !== req.user.id) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const { is_veteran } = req.body;
+    const result = await pool.query(
+      'UPDATE users SET is_veteran = $1 WHERE id = $2 RETURNING id, is_veteran, veteran_confirmed',
+      [is_veteran !== false, req.params.id]
+    );
+    res.json(result.rows[0]);
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

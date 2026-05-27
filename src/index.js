@@ -35,6 +35,9 @@ app.use('/api/chat',         require('./routes/chat'));
 app.use('/api/admin',        require('./routes/admin'));
 app.use('/api/watch',        require('./routes/watch'));
 app.use('/api/invitations',  require('./routes/invitations'));
+app.use('/api/advocate',     require('./routes/advocate'));
+app.use('/api/messages',     require('./routes/messages'));
+app.use('/api/schools',      require('./routes/schools'));
 
 app.get('/api/health', async (req, res) => {
   try {
@@ -76,6 +79,9 @@ function getRoomCounts() {
 io.on('connection', (socket) => {
   const user = socket.user;
 
+  // Join personal room for DM delivery
+  socket.join(`user:${user.id}`);
+
   socket.on('join_room', (slug) => {
     socket.join(`room:${slug}`);
     if (!roomPresence[slug]) roomPresence[slug] = new Map();
@@ -95,6 +101,39 @@ io.on('connection', (socket) => {
     const users = roomPresence[slug] ? [...roomPresence[slug].values()] : [];
     io.to(`room:${slug}`).emit('room_presence', { slug, users });
     io.emit('room_list_update', { counts: getRoomCounts(), lastActivity });
+  });
+
+  // Direct message (private, server-relays to recipient if online)
+  socket.on('dm_send', async ({ recipient_id, content }) => {
+    if (!content?.trim()) return;
+    try {
+      // Check not blocked
+      const blocked = await pool.query(
+        `SELECT id FROM blocked_users
+         WHERE (user_id = $1 AND blocked_user_id = $2)
+            OR (user_id = $2 AND blocked_user_id = $1)`,
+        [user.id, recipient_id]
+      );
+      if (blocked.rows[0]) return;
+
+      // Verify recipient exists
+      const recip = await pool.query('SELECT id FROM users WHERE id = $1', [recipient_id]);
+      if (!recip.rows[0]) return;
+
+      const result = await pool.query(
+        `INSERT INTO messages (sender_id, recipient_id, content)
+         VALUES ($1,$2,$3)
+         RETURNING id, sender_id, recipient_id, content, read, created_at`,
+        [user.id, recipient_id, content.trim()]
+      );
+      const msg = { ...result.rows[0], sender_username: user.username };
+
+      // Emit only to recipient (if connected) and sender
+      io.to(`user:${recipient_id}`).emit('dm_received', msg);
+      socket.emit('dm_sent', msg);
+    } catch (e) {
+      console.error('dm_send socket error:', e.message);
+    }
   });
 
   socket.on('chat_message', async ({ room_slug, content }) => {
@@ -169,4 +208,14 @@ httpServer.listen(PORT, () => {
       runAtmosphericIntelligence().catch(e => console.error('[atmos-intel] run error:', e.message));
     }, ATMOS_INTERVAL);
   }, 4 * 60 * 1000);
+
+  // Schedule advocate pattern analysis daily
+  const { runAdvocateIntelligence } = require('./lib/advocateIntelligence');
+  const ADVOCATE_INTERVAL = 24 * 60 * 60 * 1000;
+  setTimeout(() => {
+    runAdvocateIntelligence().catch(e => console.error('[advocate-intel] run error:', e.message));
+    setInterval(() => {
+      runAdvocateIntelligence().catch(e => console.error('[advocate-intel] run error:', e.message));
+    }, ADVOCATE_INTERVAL);
+  }, 5 * 60 * 1000);
 });

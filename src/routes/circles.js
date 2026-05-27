@@ -7,7 +7,7 @@ const router = express.Router();
 // GET /api/circles?search=&page=&limit=
 router.get('/', async (req, res, next) => {
   try {
-    const { search, page = 1, limit = 20 } = req.query;
+    const { search, page = 1, limit = 20, circle_type } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const params = [];
     let where = 'WHERE c.is_private = FALSE';
@@ -16,6 +16,10 @@ router.get('/', async (req, res, next) => {
       params.push(`%${search}%`);
       const idx = params.length;
       where += ` AND (c.name ILIKE $${idx} OR c.description ILIKE $${idx})`;
+    }
+    if (circle_type) {
+      params.push(circle_type);
+      where += ` AND c.circle_type = $${params.length}`;
     }
 
     params.push(parseInt(limit), offset);
@@ -40,16 +44,21 @@ router.get('/', async (req, res, next) => {
 // POST /api/circles
 router.post('/', authenticate, async (req, res, next) => {
   try {
-    const { name, description, is_private } = req.body;
+    const { name, description, is_private, circle_type } = req.body;
     if (!name) return res.status(400).json({ error: 'name is required' });
+
+    const VALID_CIRCLE_TYPES = ['veteran_circle','homeschool_co_op','first_responder'];
+    if (circle_type && !VALID_CIRCLE_TYPES.includes(circle_type)) {
+      return res.status(400).json({ error: 'Invalid circle_type' });
+    }
 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       const circleResult = await client.query(
-        `INSERT INTO circles (name, description, created_by, is_private)
-         VALUES ($1, $2, $3, $4) RETURNING *`,
-        [name.trim(), description || null, req.user.id, is_private || false]
+        `INSERT INTO circles (name, description, created_by, is_private, circle_type)
+         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+        [name.trim(), description || null, req.user.id, is_private || false, circle_type || null]
       );
       const circle = circleResult.rows[0];
       await client.query(
