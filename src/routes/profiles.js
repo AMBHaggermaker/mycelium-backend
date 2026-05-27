@@ -8,16 +8,18 @@ const { uploadToR2, deleteFromR2 } = require('../lib/r2');
 const JWT_SECRET = process.env.JWT_SECRET || 'mycelium_jwt_secret_change_in_production';
 
 const DEFAULT_BOARDS = [
-  { board_type: 'bulletin',    position: 0 },
-  { board_type: 'timeline',    position: 1 },
-  { board_type: 'posts',       position: 2 },
-  { board_type: 'events',      position: 3 },
-  { board_type: 'photos',      position: 4 },
-  { board_type: 'circles',     position: 5 },
-  { board_type: 'people',      position: 6 },
-  { board_type: 'invitations', position: 7 },
-  { board_type: 'messages',    position: 8 },
-  { board_type: 'chats',       position: 9 },
+  { board_type: 'bulletin',     position: 0  },
+  { board_type: 'timeline',     position: 1  },
+  { board_type: 'posts',        position: 2  },
+  { board_type: 'events',       position: 3  },
+  { board_type: 'photos',       position: 4  },
+  { board_type: 'circles',      position: 5  },
+  { board_type: 'people',       position: 6  },
+  { board_type: 'professional', position: 7  },
+  { board_type: 'my_businesses',position: 8  },
+  { board_type: 'invitations',  position: 9  },
+  { board_type: 'messages',     position: 10 },
+  { board_type: 'chats',        position: 11 },
 ];
 
 const router = express.Router();
@@ -500,6 +502,137 @@ router.delete('/:username/wall/:postId', authenticate, async (req, res, next) =>
     if (!canDelete) return res.status(403).json({ error: 'Forbidden' });
 
     await pool.query('DELETE FROM wall_posts WHERE id = $1', [req.params.postId]);
+    res.status(204).end();
+  } catch (err) { next(err); }
+});
+
+// ── Professional board ────────────────────────────────────────────────────────
+
+// GET /api/profiles/:username/professional
+router.get('/:username/professional', async (req, res, next) => {
+  try {
+    const userRes = await pool.query(
+      'SELECT id, username, verified, founding_member FROM users WHERE lower(username) = lower($1) AND deleted_at IS NULL',
+      [req.params.username]
+    );
+    if (!userRes.rows[0]) return res.status(404).json({ error: 'User not found' });
+    const u = userRes.rows[0];
+
+    const [profRes, endorseRes] = await Promise.all([
+      pool.query('SELECT * FROM user_professional_profiles WHERE user_id = $1', [u.id]),
+      pool.query(
+        `SELECT se.skill, se.endorser_id, eu.username AS endorser_username, eu.avatar_url AS endorser_avatar
+         FROM skill_endorsements se
+         JOIN users eu ON eu.id = se.endorser_id
+         WHERE se.endorsed_id = $1`,
+        [u.id]
+      ),
+    ]);
+
+    const endorsementsBySkill = {};
+    endorseRes.rows.forEach(e => {
+      if (!endorsementsBySkill[e.skill]) endorsementsBySkill[e.skill] = [];
+      endorsementsBySkill[e.skill].push({ id: e.endorser_id, username: e.endorser_username, avatar_url: e.endorser_avatar });
+    });
+
+    const prof = profRes.rows[0] || {};
+    const affiliations = prof.business_affiliations || [];
+    let bizDetails = [];
+    if (affiliations.length) {
+      const ids = affiliations.map(a => a.business_id).filter(Boolean);
+      if (ids.length) {
+        const br = await pool.query(
+          'SELECT id, business_name, business_type, is_verified_local FROM businesses WHERE id = ANY($1) AND is_active = TRUE',
+          [ids]
+        );
+        bizDetails = br.rows;
+      }
+    }
+    const affiliationsWithDetails = affiliations.map(a => ({
+      ...a,
+      business: bizDetails.find(b => b.id === a.business_id) || null,
+    }));
+
+    res.json({
+      user:                  u,
+      profile:               prof,
+      endorsements_by_skill: endorsementsBySkill,
+      affiliations:          affiliationsWithDetails,
+    });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/profiles/professional — upsert professional profile (auth required)
+router.patch('/professional', authenticate, async (req, res, next) => {
+  try {
+    const { occupation, skills, availability, professional_bio, portfolio_urls, business_affiliations } = req.body;
+    const result = await pool.query(
+      `INSERT INTO user_professional_profiles
+         (user_id, occupation, skills, availability, professional_bio, portfolio_urls, business_affiliations)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (user_id) DO UPDATE SET
+         occupation            = COALESCE($2, user_professional_profiles.occupation),
+         skills                = COALESCE($3::text[], user_professional_profiles.skills),
+         availability          = COALESCE($4::availability_enum, user_professional_profiles.availability),
+         professional_bio      = COALESCE($5, user_professional_profiles.professional_bio),
+         portfolio_urls        = COALESCE($6::jsonb, user_professional_profiles.portfolio_urls),
+         business_affiliations = COALESCE($7::jsonb, user_professional_profiles.business_affiliations),
+         updated_at            = NOW()
+       RETURNING *`,
+      [
+        req.user.id,
+        occupation   || null,
+        skills       || null,
+        availability || null,
+        professional_bio || null,
+        portfolio_urls        != null ? JSON.stringify(portfolio_urls)        : null,
+        business_affiliations != null ? JSON.stringify(business_affiliations) : null,
+      ]
+    );
+    res.json(result.rows[0]);
+  } catch (err) { next(err); }
+});
+
+// POST /api/profiles/endorse — endorse a skill on another member's profile
+router.post('/endorse', authenticate, async (req, res, next) => {
+  try {
+    const { endorsed_username, skill } = req.body;
+    if (!endorsed_username || !skill) return res.status(400).json({ error: 'endorsed_username and skill are required' });
+
+    const target = await pool.query(
+      'SELECT id FROM users WHERE lower(username) = lower($1) AND deleted_at IS NULL',
+      [endorsed_username]
+    );
+    if (!target.rows[0]) return res.status(404).json({ error: 'User not found' });
+    if (target.rows[0].id === req.user.id) return res.status(400).json({ error: 'Cannot self-endorse' });
+
+    const endorser = await pool.query('SELECT verified, founding_member FROM users WHERE id = $1', [req.user.id]);
+    const e = endorser.rows[0];
+    if (!e?.verified && !e?.founding_member) {
+      return res.status(403).json({ error: 'Only verified members can endorse skills' });
+    }
+
+    const prof = await pool.query('SELECT skills FROM user_professional_profiles WHERE user_id = $1', [target.rows[0].id]);
+    if (!prof.rows[0]?.skills?.includes(skill)) {
+      return res.status(400).json({ error: 'That skill is not on their profile' });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO skill_endorsements (endorser_id, endorsed_id, skill)
+       VALUES ($1,$2,$3) ON CONFLICT DO NOTHING RETURNING *`,
+      [req.user.id, target.rows[0].id, skill]
+    );
+    res.json({ endorsed: true, already_existed: !result.rows[0] });
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/profiles/endorse/:endorsedId/:skill — remove an endorsement
+router.delete('/endorse/:endorsedId/:skill', authenticate, async (req, res, next) => {
+  try {
+    await pool.query(
+      'DELETE FROM skill_endorsements WHERE endorser_id = $1 AND endorsed_id = $2 AND skill = $3',
+      [req.user.id, req.params.endorsedId, decodeURIComponent(req.params.skill)]
+    );
     res.status(204).end();
   } catch (err) { next(err); }
 });

@@ -116,6 +116,7 @@ router.get('/', async (req, res, next) => {
     const result = await pool.query(
       `SELECT p.*, u.username, u.reliability_score, u.verified AS author_verified,
               u.founding_member, c.name AS circle_name,
+              b.business_name,
               ${PRIORITY_SCORE_SQL} AS priority_score,
               ${MEDIA_SQL}
               ${rsvpCountSelect}
@@ -123,6 +124,7 @@ router.get('/', async (req, res, next) => {
        FROM posts p
        JOIN users u ON u.id = p.user_id
        LEFT JOIN circles c ON c.id = p.circle_id
+       LEFT JOIN businesses b ON b.id = p.business_id
        ${rsvpJoin}
        ${where}
        ORDER BY ${orderBy}
@@ -139,7 +141,7 @@ router.get('/', async (req, res, next) => {
 router.post('/', authenticate, async (req, res, next) => {
   try {
     const { type, title, description, circle_id, capacity, location, starts_at, ends_at,
-            tags, category, subcategory, is_urgent, expires_at, commerce_type, price } = req.body;
+            tags, category, subcategory, is_urgent, expires_at, commerce_type, price, business_id } = req.body;
     if (!type || !title) return res.status(400).json({ error: 'type and title are required' });
     if (!['need', 'offer', 'event'].includes(type)) return res.status(400).json({ error: 'type must be need, offer, or event' });
     if (type === 'event' && !starts_at) return res.status(400).json({ error: 'starts_at is required for events' });
@@ -168,14 +170,14 @@ router.post('/', authenticate, async (req, res, next) => {
     const result = await pool.query(
       `INSERT INTO posts (type, title, description, user_id, circle_id, capacity, location,
                           starts_at, ends_at, tags, category, subcategory, is_urgent, auto_urgent,
-                          expires_at, commerce_type, price)
-       VALUES ($1::post_type, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                          expires_at, commerce_type, price, business_id)
+       VALUES ($1::post_type, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
        RETURNING *, '[]'::json AS media`,
       [type, title.trim(), description || null, req.user.id, circle_id || null,
        capacity || null, location || null, starts_at || null, ends_at || null,
        parsedTags, category || null, subcategory?.trim() || null,
        userUrgent, autoUrgent, expires_at || null, resolvedCommerceType,
-       price != null ? parseFloat(price) : null]
+       price != null ? parseFloat(price) : null, business_id || null]
     );
     const p = result.rows[0];
     ioLib.networkActivity('new_post', {
@@ -198,13 +200,14 @@ router.get('/:id', async (req, res, next) => {
     const result = await pool.query(
       `SELECT p.*, u.username, u.reliability_score, u.verified AS author_verified,
               u.founding_member AS author_founding_member, u.bio AS author_bio,
-              u.avatar_url AS author_avatar_url, c.name AS circle_name, ${MEDIA_SQL},
+              u.avatar_url AS author_avatar_url, c.name AS circle_name, b.business_name, ${MEDIA_SQL},
               (SELECT COUNT(*) FROM post_rsvps r WHERE r.post_id = p.id AND r.status = 'going')::int      AS rsvp_going_count,
               (SELECT COUNT(*) FROM post_rsvps r WHERE r.post_id = p.id AND r.status = 'interested')::int AS rsvp_interested_count,
               (SELECT COUNT(*) FROM post_rsvps r WHERE r.post_id = p.id AND r.status = 'saved')::int      AS rsvp_saved_count
        FROM posts p
        JOIN users u ON u.id = p.user_id
        LEFT JOIN circles c ON c.id = p.circle_id
+       LEFT JOIN businesses b ON b.id = p.business_id
        WHERE p.id = $1`,
       [req.params.id]
     );
