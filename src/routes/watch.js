@@ -13,8 +13,10 @@ const router = express.Router();
 const VALID_DASHBOARDS = new Set([
   'infrastructure', 'environment', 'housing', 'health',
   'watershed', 'food', 'surveillance', 'civic', 'land_development',
+  'atmospheric_observations',
 ]);
 const VALID_SEVERITIES = new Set(['critical','serious','moderate','minor','monitoring']);
+const LAB_DASHBOARDS   = new Set(['environment', 'food']);
 
 const uploadDir = path.resolve('uploads/watch');
 fs.mkdirSync(uploadDir, { recursive: true });
@@ -30,8 +32,9 @@ const upload = multer({
   storage,
   limits: { fileSize: 20 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const ok = new Set(['image/jpeg','image/png','image/webp','image/gif']);
-    cb(null, ok.has(file.mimetype));
+    const imgTypes = new Set(['image/jpeg','image/png','image/webp','image/gif']);
+    const pdfOk    = file.fieldname === 'lab_report' && file.mimetype === 'application/pdf';
+    cb(null, imgTypes.has(file.mimetype) || pdfOk);
   },
 });
 
@@ -576,7 +579,8 @@ router.get('/:dashboard/reports', async (req, res, next) => {
     const offset = (parseInt(page) - 1) * parseInt(limit);
 
     const result = await pool.query(
-      `SELECT wr.*, u.username
+      `SELECT wr.*, u.username,
+              (SELECT row_to_json(s) FROM soil_test_results s WHERE s.watch_report_id = wr.id LIMIT 1) AS soil_test
        FROM watch_reports wr
        JOIN users u ON u.id = wr.user_id
        WHERE wr.dashboard_type = $1
@@ -591,25 +595,36 @@ router.get('/:dashboard/reports', async (req, res, next) => {
 });
 
 // POST /api/watch/:dashboard/reports
-router.post('/:dashboard/reports', authenticate, upload.array('photos', 5), async (req, res, next) => {
+router.post('/:dashboard/reports',
+  authenticate,
+  upload.fields([{ name: 'photos', maxCount: 5 }, { name: 'lab_report', maxCount: 1 }]),
+  async (req, res, next) => {
+  const allFiles = () => {
+    const p = req.files?.photos || [];
+    const l = req.files?.lab_report || [];
+    return [...p, ...l];
+  };
   try {
     const { dashboard } = req.params;
     if (!VALID_DASHBOARDS.has(dashboard)) {
-      req.files?.forEach(f => fs.unlink(f.path, () => {}));
+      allFiles().forEach(f => fs.unlink(f.path, () => {}));
       return res.status(404).json({ error: 'Unknown dashboard' });
     }
 
-    const { title, description, location_label, location_lat, location_lng, source_url, severity, report_type } = req.body;
+    const { title, description, location_label, location_lat, location_lng,
+            source_url, severity, report_type,
+            lab_sample_type, lab_collection_date, lab_name, lab_compounds, lab_results } = req.body;
+
     if (!title?.trim()) {
-      req.files?.forEach(f => fs.unlink(f.path, () => {}));
+      allFiles().forEach(f => fs.unlink(f.path, () => {}));
       return res.status(400).json({ error: 'title is required' });
     }
     if (!severity || !VALID_SEVERITIES.has(severity)) {
-      req.files?.forEach(f => fs.unlink(f.path, () => {}));
+      allFiles().forEach(f => fs.unlink(f.path, () => {}));
       return res.status(400).json({ error: 'severity is required (critical, serious, moderate, minor, or monitoring)' });
     }
 
-    const photoUrls = (req.files || []).map(f => `/api/uploads/watch/${f.filename}`);
+    const photoUrls = (req.files?.photos || []).map(f => `/api/uploads/watch/${f.filename}`);
 
     const result = await pool.query(
       `INSERT INTO watch_reports
@@ -628,7 +643,35 @@ router.post('/:dashboard/reports', authenticate, upload.array('photos', 5), asyn
     );
 
     const row = result.rows[0];
-    const response = { ...row, username: req.user.username };
+    let soilTest = null;
+
+    // Insert lab/soil test results if provided for food or environment dashboards
+    if (LAB_DASHBOARDS.has(dashboard) && lab_sample_type) {
+      const labReportFile = req.files?.lab_report?.[0];
+      const labReportUrl  = labReportFile ? `/api/uploads/watch/${labReportFile.filename}` : null;
+      let compounds = [];
+      try { compounds = JSON.parse(lab_compounds || '[]'); } catch { compounds = []; }
+      let resultsObj = {};
+      try { resultsObj = JSON.parse(lab_results || '{}'); } catch { resultsObj = {}; }
+
+      const stResult = await pool.query(
+        `INSERT INTO soil_test_results
+           (watch_report_id, sample_type, collection_date, lab_name, compounds_tested, results, lab_report_url)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING *`,
+        [
+          row.id, lab_sample_type,
+          lab_collection_date || null,
+          lab_name || null,
+          compounds,
+          JSON.stringify(resultsObj),
+          labReportUrl,
+        ]
+      );
+      soilTest = stResult.rows[0];
+    }
+
+    const response = { ...row, username: req.user.username, soil_test: soilTest };
 
     // Email admin for critical reports
     if (severity === 'critical') {
@@ -642,7 +685,7 @@ router.post('/:dashboard/reports', authenticate, upload.array('photos', 5), asyn
 
     res.status(201).json(response);
   } catch (err) {
-    req.files?.forEach(f => fs.unlink(f.path, () => {}));
+    allFiles().forEach(f => fs.unlink(f.path, () => {}));
     next(err);
   }
 });
