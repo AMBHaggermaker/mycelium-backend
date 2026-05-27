@@ -159,4 +159,14 @@ httpServer.listen(PORT, () => {
       runLandIntelligence().catch(e => console.error('[land-intel] run error:', e.message));
     }, LAND_INTERVAL);
   }, 3 * 60 * 1000);
+
+  // Schedule atmospheric pattern analysis every 6 hours
+  const { runAtmosphericIntelligence } = require('./lib/atmosphericIntelligence');
+  const ATMOS_INTERVAL = 6 * 60 * 60 * 1000;
+  setTimeout(() => {
+    runAtmosphericIntelligence().catch(e => console.error('[atmos-intel] run error:', e.message));
+    setInterval(() => {
+      runAtmosphericIntelligence().catch(e => console.error('[atmos-intel] run error:', e.message));
+    }, ATMOS_INTERVAL);
+  }, 4 * 60 * 1000);
 });

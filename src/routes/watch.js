@@ -281,6 +281,291 @@ router.get('/anomalies', async (req, res, next) => {
   }
 });
 
+// ── Atmospheric observations ──────────────────────────────────────────────────
+
+const atmosUploadDir = path.resolve('uploads/atmospheric');
+const soilUploadDir  = path.resolve('uploads/soil-samples');
+fs.mkdirSync(atmosUploadDir, { recursive: true });
+fs.mkdirSync(soilUploadDir,  { recursive: true });
+
+const atmosStorage = multer.diskStorage({
+  destination: atmosUploadDir,
+  filename: (req, file, cb) => { const ext = path.extname(file.originalname).toLowerCase(); cb(null, `${crypto.randomUUID()}${ext}`); },
+});
+const atmosUpload = multer({
+  storage: atmosStorage,
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => { cb(null, new Set(['image/jpeg','image/png','image/webp','image/gif']).has(file.mimetype)); },
+});
+
+const soilStorage = multer.diskStorage({
+  destination: soilUploadDir,
+  filename: (req, file, cb) => { const ext = path.extname(file.originalname).toLowerCase(); cb(null, `${crypto.randomUUID()}${ext}`); },
+});
+const soilUpload = multer({
+  storage: soilStorage,
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => { cb(null, new Set(['image/jpeg','image/png','image/webp','image/gif','application/pdf']).has(file.mimetype)); },
+});
+
+const VALID_ATMOS_TYPES  = new Set(['persistent_contrail','grid_pattern','low_altitude_trail','no_corresponding_flight','unusual_spray_pattern','other']);
+const VALID_ATMOS_ALT    = new Set(['low','medium','high']);
+const VALID_ATMOS_COND   = new Set(['clear','partly_cloudy','overcast','humid']);
+const VALID_ATMOS_TRACK  = new Set(['matched_known_flight','no_match_found','partial_match','did_not_check']);
+const VALID_FOIA_STATUS  = new Set(['pending','acknowledged','partial','fulfilled','denied','appealing']);
+
+// GET /api/watch/atmospheric/observations  (public)
+router.get('/atmospheric/observations', async (req, res, next) => {
+  try {
+    const { classification, report_type, limit = 50 } = req.query;
+    const conds = []; const params = []; let i = 1;
+    if (classification) { conds.push(`ao.classification = $${i++}`); params.push(classification); }
+    if (report_type)    { conds.push(`ao.report_type = $${i++}`);    params.push(report_type); }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    const result = await pool.query(
+      `SELECT ao.*, u.username FROM atmospheric_observations ao
+       JOIN users u ON u.id = ao.user_id
+       ${where} ORDER BY ao.created_at DESC LIMIT $${i}`,
+      [...params, Math.min(parseInt(limit) || 50, 100)]
+    );
+    res.json(result.rows);
+  } catch (err) { next(err); }
+});
+
+// POST /api/watch/atmospheric/observations  (auth)
+router.post('/atmospheric/observations', authenticate, atmosUpload.array('photos', 5), async (req, res, next) => {
+  try {
+    const {
+      title, description, location_label, location_lat, location_lng, severity, report_type,
+      observation_duration_min, estimated_altitude, wind_direction, wind_speed_estimate,
+      weather_conditions, checked_flight_tracker, flight_tracking_result, source_url,
+    } = req.body;
+    if (!title?.trim()) { req.files?.forEach(f => fs.unlink(f.path, ()=>{})); return res.status(400).json({ error: 'title is required' }); }
+    if (!severity || !VALID_SEVERITIES.has(severity)) { req.files?.forEach(f => fs.unlink(f.path, ()=>{})); return res.status(400).json({ error: 'severity is required' }); }
+    if (!report_type || !VALID_ATMOS_TYPES.has(report_type)) { req.files?.forEach(f => fs.unlink(f.path, ()=>{})); return res.status(400).json({ error: 'report_type is invalid' }); }
+
+    const photoUrls = (req.files || []).map(f => `/api/uploads/atmospheric/${f.filename}`);
+    const result = await pool.query(
+      `INSERT INTO atmospheric_observations
+         (user_id, title, description, location_label, location_lat, location_lng,
+          severity, report_type, observation_duration_min, estimated_altitude,
+          wind_direction, wind_speed_estimate, weather_conditions,
+          checked_flight_tracker, flight_tracking_result, photo_urls, source_url)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`,
+      [
+        req.user.id, title.trim(), description || null,
+        location_label || null,
+        location_lat ? parseFloat(location_lat) : null,
+        location_lng ? parseFloat(location_lng) : null,
+        severity, report_type,
+        observation_duration_min ? parseInt(observation_duration_min) : null,
+        VALID_ATMOS_ALT.has(estimated_altitude)  ? estimated_altitude  : null,
+        wind_direction  || null,
+        wind_speed_estimate || null,
+        VALID_ATMOS_COND.has(weather_conditions) ? weather_conditions : null,
+        checked_flight_tracker === 'true' || checked_flight_tracker === true,
+        VALID_ATMOS_TRACK.has(flight_tracking_result) ? flight_tracking_result : null,
+        photoUrls, source_url || null,
+      ]
+    );
+    const row = { ...result.rows[0], username: req.user.username };
+    res.status(201).json(row);
+
+    // Classify async — don't block response
+    const { classifyObservation } = require('../lib/atmosphericIntelligence');
+    classifyObservation(row.id).catch(e => console.error('[atmos-intel] classify error:', e.message));
+  } catch (err) {
+    req.files?.forEach(f => fs.unlink(f.path, ()=>{}));
+    next(err);
+  }
+});
+
+// DELETE /api/watch/atmospheric/observations/:id  (admin)
+router.delete('/atmospheric/observations/:id', authenticate, requireRole('admin'), async (req, res, next) => {
+  try {
+    const result = await pool.query('DELETE FROM atmospheric_observations WHERE id=$1 RETURNING id', [req.params.id]);
+    if (!result.rows[0]) return res.status(404).json({ error: 'Not found' });
+    res.status(204).end();
+  } catch (err) { next(err); }
+});
+
+// GET /api/watch/atmospheric/permits  (public)
+router.get('/atmospheric/permits', async (req, res, next) => {
+  try {
+    const result = await pool.query(`SELECT * FROM weather_modification_permits ORDER BY created_at DESC LIMIT 50`);
+    res.json(result.rows);
+  } catch (err) { next(err); }
+});
+
+// POST /api/watch/atmospheric/permits  (admin)
+router.post('/atmospheric/permits', authenticate, requireRole('admin'), async (req, res, next) => {
+  try {
+    const { operator, permit_type, area_description, active_from, active_to, compounds_used, source_url, notes } = req.body;
+    if (!operator?.trim())          return res.status(400).json({ error: 'operator is required' });
+    if (!permit_type?.trim())       return res.status(400).json({ error: 'permit_type is required' });
+    if (!area_description?.trim())  return res.status(400).json({ error: 'area_description is required' });
+    const result = await pool.query(
+      `INSERT INTO weather_modification_permits (operator,permit_type,area_description,active_from,active_to,compounds_used,source_url,notes)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [operator.trim(), permit_type.trim(), area_description.trim(), active_from||null, active_to||null, compounds_used||null, source_url||null, notes||null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/watch/atmospheric/permits/:id  (admin)
+router.patch('/atmospheric/permits/:id', authenticate, requireRole('admin'), async (req, res, next) => {
+  try {
+    const { operator, permit_type, area_description, active_from, active_to, compounds_used, source_url, notes } = req.body;
+    const result = await pool.query(
+      `UPDATE weather_modification_permits SET
+         operator=COALESCE($1,operator), permit_type=COALESCE($2,permit_type),
+         area_description=COALESCE($3,area_description),
+         active_from=COALESCE($4::date,active_from), active_to=COALESCE($5::date,active_to),
+         compounds_used=COALESCE($6,compounds_used), source_url=COALESCE($7,source_url),
+         notes=COALESCE($8,notes), updated_at=NOW()
+       WHERE id=$9 RETURNING *`,
+      [operator?.trim()||null, permit_type?.trim()||null, area_description?.trim()||null,
+       active_from||null, active_to||null, compounds_used||null, source_url||null, notes||null, req.params.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Not found' });
+    res.json(result.rows[0]);
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/watch/atmospheric/permits/:id  (admin)
+router.delete('/atmospheric/permits/:id', authenticate, requireRole('admin'), async (req, res, next) => {
+  try {
+    const result = await pool.query('DELETE FROM weather_modification_permits WHERE id=$1 RETURNING id', [req.params.id]);
+    if (!result.rows[0]) return res.status(404).json({ error: 'Not found' });
+    res.status(204).end();
+  } catch (err) { next(err); }
+});
+
+// GET /api/watch/atmospheric/soil-samples  (public)
+router.get('/atmospheric/soil-samples', async (req, res, next) => {
+  try {
+    const { limit = 50 } = req.query;
+    const result = await pool.query(
+      `SELECT ss.*, u.username FROM soil_samples ss
+       JOIN users u ON u.id = ss.user_id
+       ORDER BY ss.created_at DESC LIMIT $1`,
+      [Math.min(parseInt(limit)||50, 100)]
+    );
+    res.json(result.rows);
+  } catch (err) { next(err); }
+});
+
+// POST /api/watch/atmospheric/soil-samples  (auth)
+router.post('/atmospheric/soil-samples', authenticate, soilUpload.single('lab_photo'), async (req, res, next) => {
+  try {
+    const {
+      sample_type, collection_date, location_lat, location_lng, location_label,
+      distance_from_obs_miles, direction_from_obs, linked_observation_id,
+      lab_name, lab_cert_number,
+      aluminum_ppb, barium_ppb, strontium_ppb, silver_ppb, tio2_ppb, pfas_ppb,
+    } = req.body;
+    const VALID_TYPES = new Set(['soil_surface','soil_deep','rainwater']);
+    if (!sample_type || !VALID_TYPES.has(sample_type))
+      return res.status(400).json({ error: 'sample_type must be soil_surface, soil_deep, or rainwater' });
+
+    const photoUrl = req.file ? `/api/uploads/soil-samples/${req.file.filename}` : null;
+    const num = v => v ? parseFloat(v) : null;
+
+    // Fetch EPA TRI sources asynchronously; use null if unavailable
+    let triSources = null;
+    if (location_lat && location_lng) {
+      const { fetchTRINearby } = require('../lib/atmosphericIntelligence');
+      triSources = await (async () => {
+        try { return await fetchTRINearby(parseFloat(location_lat), parseFloat(location_lng)); } catch { return null; }
+      })();
+    }
+
+    const result = await pool.query(
+      `INSERT INTO soil_samples
+         (user_id, sample_type, collection_date, location_lat, location_lng, location_label,
+          distance_from_obs_miles, direction_from_obs, linked_observation_id,
+          lab_name, lab_cert_number,
+          aluminum_ppb, barium_ppb, strontium_ppb, silver_ppb, tio2_ppb, pfas_ppb,
+          photo_url, tri_sources)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`,
+      [
+        req.user.id, sample_type, collection_date||null,
+        location_lat ? parseFloat(location_lat) : null,
+        location_lng ? parseFloat(location_lng) : null,
+        location_label||null,
+        distance_from_obs_miles ? parseFloat(distance_from_obs_miles) : null,
+        direction_from_obs||null,
+        linked_observation_id||null,
+        lab_name||null, lab_cert_number||null,
+        num(aluminum_ppb), num(barium_ppb), num(strontium_ppb),
+        num(silver_ppb), num(tio2_ppb), num(pfas_ppb),
+        photoUrl,
+        triSources ? JSON.stringify(triSources) : null,
+      ]
+    );
+    const row = { ...result.rows[0], username: req.user.username };
+    res.status(201).json(row);
+
+    // Trigger AI compound analysis if elevated readings
+    const s = result.rows[0];
+    const hasElevated = (s.aluminum_ppb > 50) || (s.barium_ppb > 2) || (s.strontium_ppb > 5) || (s.pfas_ppb > 0.1);
+    if (hasElevated) {
+      const { analyzeCompoundOrigin } = require('../lib/atmosphericIntelligence');
+      analyzeCompoundOrigin(s.id).catch(e => console.error('[atmos-intel] compound analysis error:', e.message));
+    }
+  } catch (err) {
+    if (req.file) fs.unlink(req.file.path, ()=>{});
+    next(err);
+  }
+});
+
+// POST /api/watch/atmospheric/soil-samples/:id/analyze  (admin — re-trigger AI)
+router.post('/atmospheric/soil-samples/:id/analyze', authenticate, requireRole('admin'), async (req, res, next) => {
+  try {
+    const { analyzeCompoundOrigin } = require('../lib/atmosphericIntelligence');
+    analyzeCompoundOrigin(req.params.id).catch(e => console.error('[atmos-intel] reanalyze error:', e.message));
+    res.json({ status: 'triggered' });
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/watch/atmospheric/soil-samples/:id  (admin)
+router.delete('/atmospheric/soil-samples/:id', authenticate, requireRole('admin'), async (req, res, next) => {
+  try {
+    const result = await pool.query('DELETE FROM soil_samples WHERE id=$1 RETURNING id', [req.params.id]);
+    if (!result.rows[0]) return res.status(404).json({ error: 'Not found' });
+    res.status(204).end();
+  } catch (err) { next(err); }
+});
+
+// GET /api/watch/atmospheric/foia  (public)
+router.get('/atmospheric/foia', async (req, res, next) => {
+  try {
+    const result = await pool.query(`SELECT * FROM atmospheric_foia ORDER BY created_at ASC`);
+    res.json(result.rows);
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/watch/atmospheric/foia/:id  (admin)
+router.patch('/atmospheric/foia/:id', authenticate, requireRole('admin'), async (req, res, next) => {
+  try {
+    const { status, submitted_date, response_due, notes } = req.body;
+    if (status && !VALID_FOIA_STATUS.has(status)) return res.status(400).json({ error: 'Invalid status' });
+    const result = await pool.query(
+      `UPDATE atmospheric_foia SET
+         status=COALESCE($1,status),
+         submitted_date=COALESCE($2::date,submitted_date),
+         response_due=COALESCE($3::date,response_due),
+         notes=COALESCE($4,notes),
+         updated_at=NOW()
+       WHERE id=$5 RETURNING *`,
+      [status||null, submitted_date||null, response_due||null, notes||null, req.params.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Not found' });
+    res.json(result.rows[0]);
+  } catch (err) { next(err); }
+});
+
 // GET /api/watch/:dashboard/reports
 router.get('/:dashboard/reports', async (req, res, next) => {
   try {
