@@ -569,6 +569,31 @@ router.patch('/atmospheric/foia/:id', authenticate, requireRole('admin'), async 
   } catch (err) { next(err); }
 });
 
+// GET /api/watch/all-reports  — all dashboards, map-ready (only returns reports with lat/lng or location_label)
+router.get('/all-reports', async (req, res, next) => {
+  try {
+    const { dashboard, severity, from_date, to_date, limit = 200 } = req.query;
+    const conds = []; const params = []; let i = 1;
+    if (dashboard && VALID_DASHBOARDS.has(dashboard)) { conds.push(`wr.dashboard_type = $${i++}`); params.push(dashboard); }
+    if (severity   && VALID_SEVERITIES.has(severity)) { conds.push(`wr.severity = $${i++}`);        params.push(severity); }
+    if (from_date) { conds.push(`wr.created_at >= $${i++}`); params.push(from_date); }
+    if (to_date)   { conds.push(`wr.created_at <= $${i++}`); params.push(to_date); }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    const result = await pool.query(
+      `SELECT wr.id, wr.dashboard_type, wr.title, wr.description, wr.location_label,
+              wr.location_lat, wr.location_lng, wr.severity, wr.report_type,
+              wr.verified, wr.created_at, u.username
+       FROM watch_reports wr
+       JOIN users u ON u.id = wr.user_id
+       ${where}
+       ORDER BY wr.created_at DESC
+       LIMIT $${i}`,
+      [...params, Math.min(parseInt(limit)||200, 500)]
+    );
+    res.json(result.rows);
+  } catch (err) { next(err); }
+});
+
 // GET /api/watch/:dashboard/reports
 router.get('/:dashboard/reports', async (req, res, next) => {
   try {
@@ -672,6 +697,18 @@ router.post('/:dashboard/reports',
     }
 
     const response = { ...row, username: req.user.username, soil_test: soilTest };
+
+    // Geocode asynchronously when coords missing but location_label present
+    if (!row.location_lat && location_label?.trim()) {
+      const { nominatimGeocode } = require('../lib/geocode');
+      nominatimGeocode(location_label.trim()).then(coords => {
+        if (!coords) return;
+        pool.query(
+          'UPDATE watch_reports SET location_lat=$1, location_lng=$2 WHERE id=$3',
+          [coords.lat, coords.lng, row.id]
+        ).catch(() => {});
+      }).catch(() => {});
+    }
 
     // Email admin for critical reports
     if (severity === 'critical') {
