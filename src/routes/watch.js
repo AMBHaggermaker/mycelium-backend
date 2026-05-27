@@ -517,6 +517,44 @@ router.post('/atmospheric/soil-samples', authenticate, soilUpload.single('lab_ph
       const { analyzeCompoundOrigin } = require('../lib/atmosphericIntelligence');
       analyzeCompoundOrigin(s.id).catch(e => console.error('[atmos-intel] compound analysis error:', e.message));
     }
+
+    // Auto-link to nearby observation drift zone if not manually linked
+    if (!linked_observation_id && location_lat && location_lng) {
+      (async () => {
+        try {
+          const lat = parseFloat(location_lat);
+          const lng = parseFloat(location_lng);
+          const nearby = await pool.query(
+            `SELECT id, drift_zones FROM atmospheric_observations
+             WHERE drift_zones IS NOT NULL
+               AND created_at > NOW() - INTERVAL '30 days'
+               AND ((location_lat - $1)^2 + (location_lng - $2)^2) < 0.25
+             ORDER BY created_at DESC LIMIT 10`,
+            [lat, lng]
+          );
+          const MPD = 69.0;
+          const cosLat = Math.cos(lat * Math.PI / 180);
+          for (const obs of nearby.rows) {
+            const zones = typeof obs.drift_zones === 'string' ? JSON.parse(obs.drift_zones) : obs.drift_zones;
+            if (!Array.isArray(zones)) continue;
+            for (const z of zones) {
+              const d = Math.sqrt(
+                Math.pow((z.lat - lat) * MPD, 2) +
+                Math.pow((z.lng - lng) * MPD * cosLat, 2)
+              );
+              if (d <= 5.0) {
+                await pool.query(
+                  'UPDATE soil_samples SET linked_observation_id=$1 WHERE id=$2 AND linked_observation_id IS NULL',
+                  [obs.id, s.id]
+                );
+                console.log(`[atmos-intel] Sample ${s.id} auto-linked to obs ${obs.id} (drift zone ~${d.toFixed(1)} mi)`);
+                return;
+              }
+            }
+          }
+        } catch(e) { console.log('[atmos-intel] Drift auto-link (non-fatal):', e.message); }
+      })();
+    }
   } catch (err) {
     if (req.file) fs.unlink(req.file.path, ()=>{});
     next(err);
