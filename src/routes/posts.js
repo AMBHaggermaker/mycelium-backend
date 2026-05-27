@@ -232,14 +232,18 @@ router.post('/:id/comments', authenticate, async (req, res, next) => {
       [req.params.id, req.user.id, content.trim()]
     );
     const row = result.rows[0];
+    const u = await pool.query(
+      `SELECT username, avatar_url, founding_member, verified, reliability_score FROM users WHERE id = $1`,
+      [req.user.id]
+    ).then(r => r.rows[0] || {});
     res.status(201).json({
       ...row,
       user_id: req.user.id,
-      username: req.user.username,
-      avatar_url: req.user.avatar_url || null,
-      founding_member: req.user.founding_member || false,
-      verified: req.user.verified || false,
-      reliability_score: req.user.reliability_score || 5,
+      username:          u.username          || req.user.username,
+      avatar_url:        u.avatar_url        || null,
+      founding_member:   u.founding_member   || false,
+      verified:          u.verified          || false,
+      reliability_score: u.reliability_score || 5,
     });
   } catch (err) {
     next(err);

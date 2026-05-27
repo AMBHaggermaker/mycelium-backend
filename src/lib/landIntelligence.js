@@ -1,46 +1,39 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const pool = require('../db');
 
-const LAND_INTEL_PROMPT = `You are a land development intelligence analyst for Huntsville, Alabama and Madison County. Analyze community reports to identify land development patterns that may affect residents, particularly displacement risks and corporate land acquisition activity.
-
-Community reports (last 90 days):
-{REPORTS}
-
-Based on these community reports and your knowledge of Huntsville/Madison County development patterns, generate land development intelligence reports. Look for:
-
-1. DISPLACEMENT_RISK — housing code violations + civic rezoning in the same area suggest displacement pressure
-2. LLC_ACQUISITION_PATTERN — clustering of housing issues suggesting bulk corporate buying
-3. ZONING_CHANGE_REQUEST — civic reports mentioning rezoning near residential areas
-4. ANNEXATION_ACTIVITY — civic reports about annexation filings
-5. BULK_PURCHASE_PATTERN — area has 3+ housing reports of different types suggesting multiple buyers
-6. AGRICULTURAL_CONVERSION — rural area reports suggesting farmland development pressure
-7. PROPERTY_TRANSFER_CLUSTER — multiple housing/civic reports in same small area within 60 days
-
-Huntsville context:
-- Historically vulnerable neighborhoods: Lincoln Mill, Five Points, North Huntsville, Lowe Mill corridor
-- Active growth corridors: Cummings Research Park, Highway 72 west, Airport Road SE, I-565 corridor
-- Redstone Arsenal expansion drives displacement north and west
-
-Return ONLY valid JSON:
-{
-  "reports": [
-    {
-      "report_type": "displacement_risk|llc_acquisition_pattern|zoning_change_request|annexation_activity|bulk_purchase_pattern|agricultural_conversion|property_transfer_cluster",
-      "title": "Brief title under 70 chars",
-      "summary": "1-2 sentences: what the pattern is and why it matters for residents",
-      "affected_areas": ["neighborhood or street name"],
-      "data_sources": ["Community watch reports", "Madison County public records context"],
-      "ai_confidence": "low|medium|high"
-    }
-  ]
+// ── EPA ECHO API (proper REST API, not scraping) ──────────────────────────────
+async function fetchECHOFacilities() {
+  try {
+    const params = new URLSearchParams({
+      output:      'JSON',
+      p_st:        'AL',
+      p_county:    'MADISON',
+      p_per_page:  '20',
+      p_act:       'Y',   // active facilities only
+      p_qiv:       '5',   // at least one inspection/violation in 5 years
+    });
+    const url = `https://echodata.epa.gov/echo/facility_search.json?${params}`;
+    const res = await fetch(url, {
+      signal:  AbortSignal.timeout(12000),
+      headers: { Accept: 'application/json' },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const facilities = data?.Results?.Facilities || [];
+    return facilities.slice(0, 20).map(f => ({
+      name:     f.FacilityName,
+      city:     f.City,
+      address:  f.LocationAddress,
+      programs: f.ProgramSystemAcronyms,
+      status:   f.CurrentVioStatus,
+    }));
+  } catch (e) {
+    console.log('[land-intel] EPA ECHO unavailable (non-fatal):', e.message);
+    return null;
+  }
 }
 
-Rules:
-- Only include patterns with genuine evidence from the community data
-- high = clear evidence in reports; medium = plausible inference; low = speculative
-- Maximum 5 reports
-- Return {"reports": []} if no meaningful patterns found`;
-
+// ── Main analysis loop ────────────────────────────────────────────────────────
 async function runLandIntelligence() {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -50,37 +43,119 @@ async function runLandIntelligence() {
 
   console.log('[land-intel] Starting land intelligence run…');
 
+  // 1. Fetch community-submitted land records (primary source)
+  let landRecords;
+  try {
+    const result = await pool.query(
+      `SELECT lr.*, u.username AS submitted_by_username
+       FROM land_records lr
+       JOIN users u ON u.id = lr.submitted_by
+       WHERE lr.created_at > NOW() - INTERVAL '180 days'
+       ORDER BY lr.created_at DESC
+       LIMIT 100`
+    );
+    landRecords = result.rows;
+  } catch (e) {
+    console.error('[land-intel] Failed to fetch land records:', e.message);
+    return;
+  }
+
+  // 2. Fetch community watch reports (context)
   let communityReports;
   try {
     const result = await pool.query(
       `SELECT id, dashboard_type, title, description, location_label,
               severity, report_type, created_at
        FROM watch_reports
-       WHERE dashboard_type IN ('housing','civic','environment','health','land_development')
+       WHERE dashboard_type IN ('housing','civic','health','environment','land_development')
          AND created_at > NOW() - INTERVAL '90 days'
        ORDER BY created_at DESC
-       LIMIT 100`
+       LIMIT 80`
     );
     communityReports = result.rows;
   } catch (e) {
-    console.error('[land-intel] DB fetch failed:', e.message);
-    return;
+    console.error('[land-intel] Failed to fetch community reports:', e.message);
+    communityReports = [];
   }
 
-  if (communityReports.length < 2) {
-    console.log('[land-intel] Too few reports to analyze, skipping');
+  // 3. EPA ECHO facilities (best-effort environmental context)
+  const echoFacilities = await fetchECHOFacilities();
+
+  // Require at least some submitted land records to proceed
+  if (landRecords.length === 0 && communityReports.length < 3) {
+    console.log('[land-intel] Insufficient data — skipping analysis');
     return;
   }
 
   const client = new Anthropic({ apiKey });
-  const prompt = LAND_INTEL_PROMPT.replace('{REPORTS}', JSON.stringify(communityReports, null, 2));
+
+  const echoSection = echoFacilities
+    ? `EPA ECHO — Active environmental facilities in Madison County (${echoFacilities.length} flagged):\n${JSON.stringify(echoFacilities, null, 2)}`
+    : 'EPA ECHO data unavailable for this run.';
+
+  const prompt = `You are a land development intelligence analyst for Huntsville, Alabama and Madison County. You are analyzing community-submitted public records and watch reports to identify patterns that may harm residents.
+
+DATA SOURCES
+============
+
+1. COMMUNITY-SUBMITTED LAND RECORDS (primary — human-verified public records):
+${landRecords.length > 0 ? JSON.stringify(landRecords, null, 2) : '(no records submitted yet)'}
+
+2. COMMUNITY WATCH REPORTS — housing, civic, health, environment (context):
+${JSON.stringify(communityReports, null, 2)}
+
+3. ${echoSection}
+
+ANALYSIS INSTRUCTIONS
+====================
+Look for these patterns in the submitted land records and watch reports:
+
+1. LLC_ACQUISITION_PATTERN — same buyer (especially LLC/Holdings/Capital/Properties/Ventures) appears in 2+ property transfer records
+2. BULK_PURCHASE_PATTERN — same buyer acquires 3+ properties within 90 days in the same area
+3. DISPLACEMENT_RISK — zoning changes (R→I or R→C) OR annexation filings in areas that ALSO have housing violation watch reports nearby
+4. ANNEXATION_ACTIVITY — annexation filings, especially near neighborhoods with housing complaints
+5. ZONING_CHANGE_REQUEST — rezoning requests near residential areas, especially if watch reports exist nearby
+6. PROPERTY_TRANSFER_CLUSTER — multiple property transfers within a small geographic area in a short timeframe
+7. PLANNING_DECISION_IMPACT — planning commission approvals for projects in areas with multiple watch reports
+
+ALERT FLAGS (always mention explicitly in description if triggered):
+- Buyer is an LLC or corporate entity (flag the entity name)
+- Same buyer in 3+ transactions within 90 days in same area (bulk purchase threshold)
+- Annexation filing affects area with existing housing violation/displacement watch reports
+- Zoning change from residential to commercial/industrial near housing complaint clusters
+
+Return ONLY valid JSON — no explanation outside the JSON:
+{
+  "reports": [
+    {
+      "report_type": "llc_acquisition_pattern|bulk_purchase_pattern|displacement_risk|annexation_activity|zoning_change_request|property_transfer_cluster|planning_decision_impact",
+      "title": "Concise title under 80 chars",
+      "summary": "2-3 sentences: what the pattern is, why it matters for residents, which entity is involved if known",
+      "affected_areas": ["neighborhood or street"],
+      "data_sources": ["Community-submitted land records", "Community watch reports", "EPA ECHO"],
+      "ai_confidence": "low|medium|high",
+      "flags": {
+        "llc_buyer": true|false,
+        "bulk_purchase_threshold": true|false,
+        "annexation_near_housing_reports": true|false
+      }
+    }
+  ]
+}
+
+Rules:
+- Only include reports with actual evidence from the submitted data
+- high confidence = clear evidence in submitted records; medium = pattern inferred from watch reports; low = speculative
+- Max 6 reports per run
+- If buyer name ends in LLC, Holdings, Properties, Capital, Ventures, Partners — set llc_buyer: true
+- Return {"reports": []} if no meaningful patterns found`;
 
   let rawResponse;
   try {
     const message = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model:      'claude-haiku-4-5-20251001',
       max_tokens: 2048,
-      messages: [{ role: 'user', content: prompt }],
+      messages:   [{ role: 'user', content: prompt }],
     });
     rawResponse = message.content[0]?.text || '';
     console.log('[land-intel] Claude responded:', rawResponse.slice(0, 200));
@@ -134,7 +209,7 @@ async function runLandIntelligence() {
           r.title.slice(0, 255),
           r.summary,
           r.affected_areas || [],
-          r.data_sources || ['Community watch reports analysis'],
+          r.data_sources || ['Community-submitted land records'],
           r.ai_confidence,
           JSON.stringify(r),
         ]
@@ -149,13 +224,16 @@ async function runLandIntelligence() {
 
   if (savedCount > 0) {
     await crossDashboardCorrelation(reports).catch(e =>
-      console.error('[land-intel] Cross-dashboard correlation error:', e.message)
+      console.error('[land-intel] Cross-dashboard error:', e.message)
     );
   }
 }
 
 async function crossDashboardCorrelation(landReports) {
-  const displacementTypes = ['displacement_risk', 'llc_acquisition_pattern', 'bulk_purchase_pattern', 'property_transfer_cluster'];
+  const displacementTypes = [
+    'displacement_risk', 'llc_acquisition_pattern',
+    'bulk_purchase_pattern', 'property_transfer_cluster',
+  ];
 
   for (const r of landReports) {
     if (!displacementTypes.includes(r.report_type)) continue;
@@ -173,7 +251,6 @@ async function crossDashboardCorrelation(landReports) {
        LIMIT 5`,
       [`%${areaKey}%`]
     );
-
     if (housingResult.rows.length < 2) continue;
 
     const dupeCheck = await pool.query(
@@ -186,17 +263,16 @@ async function crossDashboardCorrelation(landReports) {
     );
     if (dupeCheck.rows[0]) continue;
 
-    const affectedIds = housingResult.rows.map(row => row.id);
     const typeLabel = r.report_type.replace(/_/g, ' ');
-
     await pool.query(
       `INSERT INTO watch_anomalies
-         (anomaly_type, description, affected_reports, severity, dashboard_types, location_label, ai_confidence)
+         (anomaly_type, description, affected_reports, severity,
+          dashboard_types, location_label, ai_confidence)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
         'cross_dashboard',
         `Land development intelligence detected ${typeLabel} activity in ${area}. ${housingResult.rows.length} housing/health community reports in the same area suggest potential displacement pressure — residents may be experiencing impacts before formal development begins.`,
-        affectedIds,
+        housingResult.rows.map(row => row.id),
         'serious',
         ['housing', 'land_development'],
         area,
