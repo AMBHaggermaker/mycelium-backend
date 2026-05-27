@@ -12,7 +12,7 @@ const router = express.Router();
 
 const VALID_DASHBOARDS = new Set([
   'infrastructure', 'environment', 'housing', 'health',
-  'watershed', 'food', 'surveillance', 'civic',
+  'watershed', 'food', 'surveillance', 'civic', 'land_development',
 ]);
 const VALID_SEVERITIES = new Set(['critical','serious','moderate','minor','monitoring']);
 
@@ -33,6 +33,33 @@ const upload = multer({
     const ok = new Set(['image/jpeg','image/png','image/webp','image/gif']);
     cb(null, ok.has(file.mimetype));
   },
+});
+
+// GET /api/watch/land-intelligence/reports  (public)
+router.get('/land-intelligence/reports', async (req, res, next) => {
+  try {
+    const { limit = 20 } = req.query;
+    const result = await pool.query(
+      `SELECT * FROM land_development_reports
+       ORDER BY created_at DESC
+       LIMIT $1`,
+      [Math.min(parseInt(limit) || 20, 50)]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/watch/land-intelligence/trigger  (admin)
+router.post('/land-intelligence/trigger', authenticate, requireRole('admin'), async (req, res, next) => {
+  try {
+    const { runLandIntelligence } = require('../lib/landIntelligence');
+    runLandIntelligence().catch(e => console.error('[land-intel] manual trigger error:', e.message));
+    res.json({ status: 'triggered' });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // GET /api/watch/anomalies  (public)

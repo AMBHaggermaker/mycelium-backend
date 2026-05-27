@@ -164,7 +164,9 @@ router.post('/', authenticate, async (req, res, next) => {
 router.get('/:id', async (req, res, next) => {
   try {
     const result = await pool.query(
-      `SELECT p.*, u.username, u.reliability_score, u.bio AS author_bio, c.name AS circle_name, ${MEDIA_SQL}
+      `SELECT p.*, u.username, u.reliability_score, u.verified AS author_verified,
+              u.founding_member AS author_founding_member, u.bio AS author_bio,
+              u.avatar_url AS author_avatar_url, c.name AS circle_name, ${MEDIA_SQL}
        FROM posts p
        JOIN users u ON u.id = p.user_id
        LEFT JOIN circles c ON c.id = p.circle_id
@@ -173,6 +175,72 @@ router.get('/:id', async (req, res, next) => {
     );
     if (!result.rows[0]) return res.status(404).json({ error: 'Post not found' });
     res.json(result.rows[0]);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/posts/:id/my-reservation
+router.get('/:id/my-reservation', authenticate, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT id FROM reservations
+       WHERE post_id = $1 AND user_id = $2
+         AND status NOT IN ('cancelled','completed')
+       LIMIT 1`,
+      [req.params.id, req.user.id]
+    );
+    res.json({ reservation_id: result.rows[0]?.id || null });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/posts/:id/comments
+router.get('/:id/comments', async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT pc.id, pc.content, pc.created_at,
+              u.id AS user_id, u.username, u.avatar_url,
+              u.founding_member, u.verified, u.reliability_score
+       FROM post_comments pc
+       JOIN users u ON u.id = pc.user_id
+       WHERE pc.post_id = $1
+       ORDER BY pc.created_at ASC`,
+      [req.params.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/posts/:id/comments
+router.post('/:id/comments', authenticate, async (req, res, next) => {
+  try {
+    const { content } = req.body;
+    if (!content?.trim()) return res.status(400).json({ error: 'content is required' });
+    if (content.trim().length > 2000) return res.status(400).json({ error: 'comment too long (max 2000 chars)' });
+
+    const post = await pool.query('SELECT id FROM posts WHERE id = $1', [req.params.id]);
+    if (!post.rows[0]) return res.status(404).json({ error: 'Post not found' });
+
+    const result = await pool.query(
+      `INSERT INTO post_comments (post_id, user_id, content)
+       VALUES ($1, $2, $3)
+       RETURNING id, content, created_at`,
+      [req.params.id, req.user.id, content.trim()]
+    );
+    const row = result.rows[0];
+    res.status(201).json({
+      ...row,
+      user_id: req.user.id,
+      username: req.user.username,
+      avatar_url: req.user.avatar_url || null,
+      founding_member: req.user.founding_member || false,
+      verified: req.user.verified || false,
+      reliability_score: req.user.reliability_score || 5,
+    });
   } catch (err) {
     next(err);
   }

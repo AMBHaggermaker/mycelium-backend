@@ -142,12 +142,21 @@ httpServer.listen(PORT, () => {
 
   // Schedule AI anomaly detection every 30 minutes
   const { runAnomalyDetection } = require('./lib/anomalyDetector');
-  const INTERVAL_MS = 30 * 60 * 1000;
-  // First run after 2-minute warm-up
+  const ANOMALY_INTERVAL = 30 * 60 * 1000;
   setTimeout(() => {
     runAnomalyDetection().catch(e => console.error('[anomaly] run error:', e.message));
     setInterval(() => {
       runAnomalyDetection().catch(e => console.error('[anomaly] run error:', e.message));
-    }, INTERVAL_MS);
+    }, ANOMALY_INTERVAL);
   }, 2 * 60 * 1000);
+
+  // Schedule land development intelligence every 6 hours
+  const { runLandIntelligence } = require('./lib/landIntelligence');
+  const LAND_INTERVAL = 6 * 60 * 60 * 1000;
+  setTimeout(() => {
+    runLandIntelligence().catch(e => console.error('[land-intel] run error:', e.message));
+    setInterval(() => {
+      runLandIntelligence().catch(e => console.error('[land-intel] run error:', e.message));
+    }, LAND_INTERVAL);
+  }, 3 * 60 * 1000);
 });
