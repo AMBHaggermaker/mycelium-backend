@@ -83,9 +83,12 @@ router.get('/', async (req, res, next) => {
     const params = [];
     const conditions = [];
 
+    // Always exclude non-active and expired posts from the public feed
+    conditions.push(`p.status = 'active'`);
+    conditions.push(`(p.expires_at IS NULL OR p.expires_at > NOW())`);
+
     if (type)       { params.push(type);                                  conditions.push(`p.type = $${params.length}::post_type`); }
     if (circle_id)  { params.push(circle_id);                             conditions.push(`p.circle_id = $${params.length}`); }
-    if (status)     { params.push(status);                                conditions.push(`p.status = $${params.length}::post_status`); }
     if (tags)       { params.push(tags.split(',').map(t => t.trim()));    conditions.push(`p.tags && $${params.length}::text[]`); }
     if (category)   { params.push(category);                              conditions.push(`p.category = $${params.length}`); }
     if (subcategory){ params.push(subcategory);                           conditions.push(`p.subcategory ILIKE $${params.length}`); }
@@ -100,7 +103,7 @@ router.get('/', async (req, res, next) => {
       conditions.push(`(p.auto_urgent = TRUE OR p.is_urgent = TRUE OR p.commerce_type = 'urgent')`);
     }
 
-    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const where = `WHERE ${conditions.join(' AND ')}`;
     const orderBy = SORT_ORDER[sort] || SORT_ORDER.recent;
     params.push(parseInt(limit), offset);
 
@@ -189,6 +192,63 @@ router.post('/', authenticate, async (req, res, next) => {
     }, (p.auto_urgent || p.is_urgent) ? 'urgent' : 'normal');
 
     res.status(201).json(p);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/posts/my-posts — all posts by the authenticated user (all statuses)
+router.get('/my-posts', authenticate, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT p.*,
+              (SELECT COUNT(*)::int FROM reservations r WHERE r.post_id = p.id AND r.status NOT IN ('cancelled')) AS reservation_count,
+              (SELECT COUNT(*)::int FROM post_rsvps r WHERE r.post_id = p.id AND r.status = 'going') AS rsvp_going_count,
+              ${MEDIA_SQL}
+       FROM posts p
+       WHERE p.user_id = $1
+       ORDER BY p.created_at DESC`,
+      [req.user.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/posts/:id/complete — mark post as fulfilled (owner only)
+router.patch('/:id/complete', authenticate, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `UPDATE posts SET status = 'fulfilled', updated_at = NOW()
+       WHERE id = $1 AND user_id = $2
+       RETURNING id, status`,
+      [req.params.id, req.user.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Post not found or forbidden' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/posts/:id/extend — extend expiry date (owner only, must not already be expired)
+router.patch('/:id/extend', authenticate, async (req, res, next) => {
+  try {
+    const { expires_at } = req.body;
+    if (!expires_at) return res.status(400).json({ error: 'expires_at is required' });
+    const newExpiry = new Date(expires_at);
+    if (isNaN(newExpiry) || newExpiry <= new Date()) {
+      return res.status(400).json({ error: 'expires_at must be a future date' });
+    }
+    const result = await pool.query(
+      `UPDATE posts SET expires_at = $1, updated_at = NOW()
+       WHERE id = $2 AND user_id = $3 AND (expires_at IS NULL OR expires_at > NOW())
+       RETURNING id, expires_at`,
+      [newExpiry.toISOString(), req.params.id, req.user.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Post not found, forbidden, or already expired' });
+    res.json(result.rows[0]);
   } catch (err) {
     next(err);
   }
@@ -345,12 +405,14 @@ router.patch('/:id', authenticate, async (req, res, next) => {
   }
 });
 
-// DELETE /api/posts/:id
+// DELETE /api/posts/:id — author, admin, or moderator; cascades to reservations and RSVPs
 router.delete('/:id', authenticate, async (req, res, next) => {
   try {
     const result = await pool.query('SELECT user_id FROM posts WHERE id = $1', [req.params.id]);
     if (!result.rows[0]) return res.status(404).json({ error: 'Post not found' });
-    if (result.rows[0].user_id !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
+    const isOwner = result.rows[0].user_id === req.user.id;
+    const isPrivileged = ['admin', 'moderator'].includes(req.user.role);
+    if (!isOwner && !isPrivileged) return res.status(403).json({ error: 'Forbidden' });
     await pool.query('DELETE FROM posts WHERE id = $1', [req.params.id]);
     res.status(204).end();
   } catch (err) {

@@ -229,4 +229,9 @@ httpServer.listen(PORT, () => {
       runAdvocateIntelligence().catch(e => console.error('[advocate-intel] run error:', e.message));
     }, ADVOCATE_INTERVAL);
   }, 5 * 60 * 1000);
+
+  // Expire posts hourly
+  const { expireOldPosts } = require('./jobs/expiry');
+  expireOldPosts();
+  setInterval(expireOldPosts, 60 * 60 * 1000);
 });
