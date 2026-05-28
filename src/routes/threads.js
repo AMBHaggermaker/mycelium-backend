@@ -4,10 +4,10 @@ const authenticate = require('../middleware/auth');
 
 const router = express.Router();
 
-// GET /api/threads?circle_id=&post_id=&page=&limit=
+// GET /api/threads?circle_id=&post_id=&wall_post_id=&page=&limit=
 router.get('/', async (req, res, next) => {
   try {
-    const { circle_id, post_id, page = 1, limit = 20 } = req.query;
+    const { circle_id, post_id, wall_post_id, page = 1, limit = 20 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const params = [];
     const conditions = [];
@@ -19,6 +19,10 @@ router.get('/', async (req, res, next) => {
     if (post_id) {
       params.push(post_id);
       conditions.push(`t.post_id = $${params.length}`);
+    }
+    if (wall_post_id) {
+      params.push(wall_post_id);
+      conditions.push(`t.wall_post_id = $${params.length}`);
     }
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -46,10 +50,10 @@ router.get('/', async (req, res, next) => {
 // POST /api/threads
 router.post('/', authenticate, async (req, res, next) => {
   try {
-    const { title, post_id, circle_id } = req.body;
+    const { title, post_id, circle_id, wall_post_id } = req.body;
     if (!title) return res.status(400).json({ error: 'title is required' });
-    if (!post_id && !circle_id) {
-      return res.status(400).json({ error: 'post_id or circle_id is required' });
+    if (!post_id && !circle_id && !wall_post_id) {
+      return res.status(400).json({ error: 'post_id, circle_id, or wall_post_id is required' });
     }
 
     if (circle_id) {
@@ -63,9 +67,9 @@ router.post('/', authenticate, async (req, res, next) => {
     }
 
     const result = await pool.query(
-      `INSERT INTO threads (title, post_id, circle_id, created_by)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [title.trim(), post_id || null, circle_id || null, req.user.id]
+      `INSERT INTO threads (title, post_id, circle_id, wall_post_id, created_by)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [title.trim(), post_id || null, circle_id || null, wall_post_id || null, req.user.id]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {

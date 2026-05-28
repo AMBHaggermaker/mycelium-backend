@@ -49,7 +49,7 @@ router.get('/:username', async (req, res, next) => {
               background_photo_url, background_overlay_opacity,
               profile_network_settings, profile_stickers,
               pattern_type, pattern_color_primary, pattern_color_secondary,
-              pattern_scale, pattern_opacity
+              pattern_scale, pattern_opacity, wall_privacy
        FROM users
        WHERE lower(username) = lower($1) AND deleted_at IS NULL`,
       [req.params.username]
@@ -125,15 +125,16 @@ router.get('/:username', async (req, res, next) => {
       [u.id]
     );
 
-    // Wall posts (latest 20)
+    // Wall posts — pinned first, then newest
     const wallResult = await pool.query(
-      `SELECT wp.id, wp.content, wp.created_at,
+      `SELECT wp.id, wp.content, wp.photo_urls, wp.is_pinned, wp.collage_layout, wp.created_at,
               u2.id AS author_id, u2.username AS author_username,
-              u2.avatar_url AS author_avatar_url, u2.verified AS author_verified
+              u2.avatar_url AS author_avatar_url, u2.verified AS author_verified,
+              (SELECT COUNT(*) FROM threads t WHERE t.wall_post_id = wp.id)::int AS reply_count
        FROM wall_posts wp
        JOIN users u2 ON u2.id = wp.author_id
        WHERE wp.profile_user_id = $1
-       ORDER BY wp.created_at DESC LIMIT 20`,
+       ORDER BY wp.is_pinned DESC, wp.created_at DESC LIMIT 50`,
       [u.id]
     );
 
@@ -165,8 +166,10 @@ router.patch('/customize', authenticate, async (req, res, next) => {
       profile_network_settings, profile_stickers,
       pattern_type, pattern_color_primary, pattern_color_secondary,
       pattern_scale, pattern_opacity,
+      wall_privacy,
     } = req.body;
 
+    const VALID_WALL_PRIVACY = ['everyone', 'network', 'disabled'];
     const VALID_FONTS    = ['classic','modern','typewriter','editorial'];
     const VALID_LAYOUTS  = ['standard','wide','minimal','sidebar'];
     const VALID_THEMES   = ['light','dark'];
@@ -180,6 +183,7 @@ router.patch('/customize', authenticate, async (req, res, next) => {
     if (pinned_bulletin && pinned_bulletin.length > 500)          return res.status(400).json({ error: 'pinned_bulletin max 500 characters' });
     if (pattern_type  && !VALID_PATTERNS.includes(pattern_type))  return res.status(400).json({ error: 'Invalid pattern_type' });
     if (pattern_scale && !VALID_SCALES.includes(pattern_scale))   return res.status(400).json({ error: 'Invalid pattern_scale' });
+    if (wall_privacy  && !VALID_WALL_PRIVACY.includes(wall_privacy)) return res.status(400).json({ error: 'Invalid wall_privacy' });
     if (background_overlay_opacity != null) {
       const v = parseFloat(background_overlay_opacity);
       if (isNaN(v) || v < 0 || v > 0.9) return res.status(400).json({ error: 'background_overlay_opacity must be 0–0.9' });
@@ -223,8 +227,9 @@ router.patch('/customize', authenticate, async (req, res, next) => {
          pattern_color_secondary   = COALESCE($25, pattern_color_secondary),
          pattern_scale             = COALESCE($26, pattern_scale),
          pattern_opacity           = COALESCE($27, pattern_opacity),
+         wall_privacy              = COALESCE($28, wall_privacy),
          updated_at                = NOW()
-       WHERE id = $28
+       WHERE id = $29
        RETURNING id, username, bio, location, website, avatar_url,
                  mood, mood_emoji, status_text, music_url, music_label,
                  background_color, background_gradient, accent_color,
@@ -264,6 +269,7 @@ router.patch('/customize', authenticate, async (req, res, next) => {
         pattern_color_secondary   ?? null,
         pattern_scale             ?? null,
         pattern_opacity           != null ? parseFloat(pattern_opacity) : null,
+        wall_privacy              ?? null,
         req.user.id,
       ]
     );
@@ -416,28 +422,101 @@ router.get('/:username/wall', async (req, res, next) => {
 });
 
 // POST /api/profiles/:username/wall
-router.post('/:username/wall', authenticate, async (req, res, next) => {
+router.post('/:username/wall', authenticate, upload.array('photos', 5), async (req, res, next) => {
   try {
-    const { content } = req.body;
-    if (!content?.trim()) return res.status(400).json({ error: 'Content is required' });
-    if (content.trim().length > 1000) return res.status(400).json({ error: 'Wall post max 1000 characters' });
+    const { content = '', collage_layout = 'single' } = req.body;
+    if (!content.trim() && (!req.files || req.files.length === 0)) {
+      return res.status(400).json({ error: 'Content or at least one photo is required' });
+    }
+    if (content.trim().length > 2000) return res.status(400).json({ error: 'Wall post max 2000 characters' });
 
-    const u = await pool.query('SELECT id FROM users WHERE lower(username) = lower($1) AND deleted_at IS NULL', [req.params.username]);
-    if (!u.rows[0]) return res.status(404).json({ error: 'User not found' });
+    const uResult = await pool.query(
+      'SELECT id, username, wall_privacy FROM users WHERE lower(username) = lower($1) AND deleted_at IS NULL',
+      [req.params.username]
+    );
+    if (!uResult.rows[0]) return res.status(404).json({ error: 'User not found' });
+    const profileUser = uResult.rows[0];
+
+    // Privacy check
+    if (profileUser.wall_privacy === 'disabled') {
+      return res.status(403).json({ error: 'This wall is not accepting posts' });
+    }
+    if (profileUser.wall_privacy === 'network' && req.user.id !== profileUser.id) {
+      const shared = await pool.query(
+        `SELECT 1 FROM circle_members cm1
+         JOIN circle_members cm2 ON cm2.circle_id = cm1.circle_id AND cm2.user_id = $2
+         WHERE cm1.user_id = $1 LIMIT 1`,
+        [req.user.id, profileUser.id]
+      );
+      if (!shared.rows.length) {
+        return res.status(403).json({ error: 'Only network members can post on this wall' });
+      }
+    }
+
+    // Upload photos to R2
+    const photoUrls = [];
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        const url = await uploadToR2(file.buffer, file.originalname, 'wall-photos');
+        photoUrls.push(url);
+      }
+    }
+
+    const VALID_LAYOUTS = ['single','side_by_side','three','grid'];
+    const layout = VALID_LAYOUTS.includes(collage_layout) ? collage_layout : 'single';
 
     const result = await pool.query(
-      `INSERT INTO wall_posts (profile_user_id, author_id, content)
-       VALUES ($1,$2,$3)
-       RETURNING id, content, created_at`,
-      [u.rows[0].id, req.user.id, content.trim()]
+      `INSERT INTO wall_posts (profile_user_id, author_id, content, photo_urls, collage_layout)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, content, photo_urls, is_pinned, collage_layout, created_at`,
+      [profileUser.id, req.user.id, content.trim(), photoUrls, layout]
     );
+    const wp = result.rows[0];
+
+    // Notify profile owner if someone else posted
+    if (req.user.id !== profileUser.id) {
+      const ioLib = require('../lib/io');
+      const notifMsg = `${req.user.username} posted on your wall`;
+      pool.query(
+        `INSERT INTO notifications (user_id, type, message, link) VALUES ($1, 'wall_post', $2, $3)`,
+        [profileUser.id, notifMsg, `/profile/${profileUser.username}`]
+      ).catch(() => {});
+      ioLib.toUser(profileUser.id, 'notification', { type: 'wall_post', message: notifMsg, link: `/profile/${profileUser.username}` });
+    }
 
     res.status(201).json({
-      ...result.rows[0],
+      ...wp,
       author_id: req.user.id,
       author_username: req.user.username,
       author_verified: false,
+      reply_count: 0,
     });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/profiles/:username/wall/:postId/pin
+router.patch('/:username/wall/:postId/pin', authenticate, async (req, res, next) => {
+  try {
+    const uResult = await pool.query(
+      'SELECT id FROM users WHERE lower(username) = lower($1) AND deleted_at IS NULL',
+      [req.params.username]
+    );
+    if (!uResult.rows[0]) return res.status(404).json({ error: 'User not found' });
+    if (req.user.id !== uResult.rows[0].id) return res.status(403).json({ error: 'Only the profile owner can pin posts' });
+
+    const wp = await pool.query('SELECT id, is_pinned FROM wall_posts WHERE id = $1 AND profile_user_id = $2', [req.params.postId, uResult.rows[0].id]);
+    if (!wp.rows[0]) return res.status(404).json({ error: 'Post not found' });
+
+    const newPinned = !wp.rows[0].is_pinned;
+    // Unpin all others first
+    if (newPinned) {
+      await pool.query('UPDATE wall_posts SET is_pinned = false WHERE profile_user_id = $1', [uResult.rows[0].id]);
+    }
+    const updated = await pool.query(
+      'UPDATE wall_posts SET is_pinned = $1 WHERE id = $2 RETURNING *',
+      [newPinned, req.params.postId]
+    );
+    res.json(updated.rows[0]);
   } catch (err) { next(err); }
 });
 

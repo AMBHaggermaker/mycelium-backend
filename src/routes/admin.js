@@ -111,7 +111,7 @@ router.get('/users/:userId/profile', requireRole('admin'), async (req, res, next
         [uid]
       ),
       pool.query(
-        `SELECT id, title, type, status, created_at, content
+        `SELECT id, title, type, status, created_at, description
          FROM posts
          WHERE user_id = $1
          ORDER BY created_at DESC

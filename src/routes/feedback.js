@@ -61,12 +61,11 @@ function requireAdmin(req, res, next) {
 }
 
 // ── POST /api/feedback ────────────────────────────────────────────────────────
-// Optional auth — works logged out (anonymous submission)
+// Requires authentication — all submissions are attributed per the Mycelium Covenant
 
-router.post('/', optionalAuth, upload.single('screenshot'), async (req, res, next) => {
+router.post('/', authenticate, upload.single('screenshot'), async (req, res, next) => {
   try {
-    const { type, description, is_anonymous } = req.body;
-    const isAnon = is_anonymous === 'true' || is_anonymous === true;
+    const { type, description } = req.body;
 
     // Validate
     if (!type || !VALID_TYPES.includes(type)) {
@@ -82,21 +81,19 @@ router.post('/', optionalAuth, upload.single('screenshot'), async (req, res, nex
       screenshotUrl = await uploadToR2(req.file.buffer, req.file.originalname, 'feedback-screenshots');
     }
 
-    const userId = (isAnon || !req.user) ? null : req.user.id;
-
     const result = await pool.query(
       `INSERT INTO feedback_submissions
          (id, user_id, is_anonymous, type, description, screenshot_url, status, created_at, updated_at)
-       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, 'new', NOW(), NOW())
+       VALUES (gen_random_uuid(), $1, false, $2, $3, $4, 'new', NOW(), NOW())
        RETURNING *`,
-      [userId, isAnon || !req.user, type, description.trim(), screenshotUrl]
+      [req.user.id, type, description.trim(), screenshotUrl]
     );
     const submission = result.rows[0];
 
     // Email notification if FEEDBACK_EMAIL env var is set
     if (process.env.FEEDBACK_EMAIL) {
       const baseUrl = process.env.APP_BASE_URL || 'https://mycelium.unprecedentedtimes.org';
-      const submitterLabel = isAnon || !req.user ? 'Anonymous user' : `User: ${req.user.username || req.user.id}`;
+      const submitterLabel = `@${req.user.username}`;
       const html = `
 <!DOCTYPE html>
 <html>

@@ -381,8 +381,8 @@ async function runAtmosphericIntelligence() {
     contextReports = r.rows;
   } catch (e) { contextReports = []; }
 
-  if (observations.length === 0 && soilSamples.length === 0) {
-    console.log('[atmos-intel] No data — skipping pattern analysis');
+  if (observations.length + soilSamples.length < 5) {
+    console.log('[atmos-intel] Fewer than 5 atmospheric observations/samples — skipping until real data accumulates');
     return;
   }
 

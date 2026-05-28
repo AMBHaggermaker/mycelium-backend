@@ -82,8 +82,8 @@ async function runLandIntelligence() {
   const echoFacilities = await fetchECHOFacilities();
 
   // Require at least some submitted land records to proceed
-  if (landRecords.length === 0 && communityReports.length < 3) {
-    console.log('[land-intel] Insufficient data — skipping analysis');
+  if (landRecords.length === 0 && communityReports.length < 5) {
+    console.log('[land-intel] Fewer than 5 community reports — skipping until real data accumulates');
     return;
   }
 

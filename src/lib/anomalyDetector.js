@@ -46,8 +46,8 @@ async function runAnomalyDetection() {
     return;
   }
 
-  if (reports.length < 3) {
-    console.log('[anomaly] Too few reports to analyze, skipping');
+  if (reports.length < 5) {
+    console.log('[anomaly] Fewer than 5 community reports — skipping until real data accumulates');
     return;
   }
 

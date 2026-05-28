@@ -24,4 +24,8 @@ module.exports = {
   networkActivity(type, data, severity = 'normal') {
     if (_io) _io.emit('network_activity', { type, severity, data, timestamp: new Date().toISOString() });
   },
+
+  toUser(userId, event, data) {
+    if (_io) _io.to(`user:${userId}`).emit(event, data);
+  },
 };
