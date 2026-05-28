@@ -541,7 +541,7 @@ router.get('/:username/boards', async (req, res, next) => {
 
     // Board settings
     const settingsResult = await pool.query(
-      'SELECT board_type, position, is_visible, background_color, font_color FROM profile_board_settings WHERE user_id = $1 ORDER BY position ASC',
+      'SELECT board_type, position, is_visible, background_color, font_color, header_font_color, body_font_color FROM profile_board_settings WHERE user_id = $1 ORDER BY position ASC',
       [userId]
     );
     const savedSettings = settingsResult.rows;
@@ -549,6 +549,7 @@ router.get('/:username/boards', async (req, res, next) => {
     const settingsMap = Object.fromEntries(savedSettings.map(s => [s.board_type, s]));
     const settings = DEFAULT_BOARDS.map(d => ({
       ...d, is_visible: true, background_color: null, font_color: null,
+      header_font_color: null, body_font_color: null,
       ...settingsMap[d.board_type],
     })).sort((a, b) => a.position - b.position);
 
@@ -638,12 +639,14 @@ router.patch('/boards/settings', authenticate, async (req, res, next) => {
     for (const b of boards) {
       if (!b.board_type) continue;
       await pool.query(
-        `INSERT INTO profile_board_settings (user_id, board_type, position, is_visible, background_color, font_color)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        `INSERT INTO profile_board_settings (user_id, board_type, position, is_visible, background_color, font_color, header_font_color, body_font_color)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (user_id, board_type) DO UPDATE
-           SET position = $3, is_visible = $4, background_color = $5, font_color = $6`,
+           SET position = $3, is_visible = $4, background_color = $5, font_color = $6,
+               header_font_color = $7, body_font_color = $8`,
         [req.user.id, b.board_type, b.position ?? 0, b.is_visible ?? true,
-         b.background_color || null, b.font_color || null]
+         b.background_color || null, b.font_color || null,
+         b.header_font_color || null, b.body_font_color || null]
       );
     }
     res.json({ saved: true });
