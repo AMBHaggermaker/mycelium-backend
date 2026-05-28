@@ -77,10 +77,10 @@ No build needed — the file is served directly.
 ### Ghost (`unprecedentedtimes.org`)
 1. Log in to Ghost Admin: http://localhost:2368/ghost
 2. Go to **Settings → Code Injection → Site Header**
-3. Paste (replace UUID):
+3. Paste:
 ```html
 <script defer src="https://analytics.unprecedentedtimes.org/script.js"
-  data-website-id="YOUR-UUID-HERE"></script>
+  data-website-id="7146d022-b556-48a7-b728-6da03bb70339"></script>
 ```
 4. Click **Save**
 
