@@ -45,7 +45,11 @@ router.get('/:username', async (req, res, next) => {
               font_style, layout, banner_image_url, profile_theme,
               pinned_bulletin, bulletin_updated_at, interests,
               is_veteran, veteran_confirmed,
-              covenant_agreed, covenant_agreed_at
+              covenant_agreed, covenant_agreed_at,
+              background_photo_url, background_overlay_opacity,
+              profile_network_settings, profile_stickers,
+              pattern_type, pattern_color_primary, pattern_color_secondary,
+              pattern_scale, pattern_opacity
        FROM users
        WHERE lower(username) = lower($1) AND deleted_at IS NULL`,
       [req.params.username]
@@ -94,14 +98,17 @@ router.get('/:username', async (req, res, next) => {
     // Co-participation (shared circles, ordered by connection strength)
     const copartResult = await pool.query(
       `SELECT u2.id, u2.username, u2.avatar_url, u2.verified, u2.founding_member,
+              u2.mood_emoji, u2.mood, u2.status_text, u2.pinned_bulletin,
+              u2.accent_color,
               COUNT(*)::int AS shared_circles
        FROM circle_members cm1
        JOIN circle_members cm2 ON cm2.circle_id = cm1.circle_id AND cm2.user_id != $1
        JOIN users u2 ON u2.id = cm2.user_id AND u2.deleted_at IS NULL
        WHERE cm1.user_id = $1
-       GROUP BY u2.id, u2.username, u2.avatar_url, u2.verified, u2.founding_member
+       GROUP BY u2.id, u2.username, u2.avatar_url, u2.verified, u2.founding_member,
+                u2.mood_emoji, u2.mood, u2.status_text, u2.pinned_bulletin, u2.accent_color
        ORDER BY shared_circles DESC
-       LIMIT 16`,
+       LIMIT 30`,
       [u.id]
     );
 
@@ -154,45 +161,79 @@ router.patch('/customize', authenticate, async (req, res, next) => {
       background_color, background_gradient, accent_color,
       font_style, layout, profile_theme,
       pinned_bulletin, interests,
+      background_photo_url, background_overlay_opacity,
+      profile_network_settings, profile_stickers,
+      pattern_type, pattern_color_primary, pattern_color_secondary,
+      pattern_scale, pattern_opacity,
     } = req.body;
 
-    const VALID_FONTS   = ['classic','modern','typewriter','editorial'];
-    const VALID_LAYOUTS = ['standard','wide','minimal','sidebar'];
-    const VALID_THEMES  = ['light','dark'];
+    const VALID_FONTS    = ['classic','modern','typewriter','editorial'];
+    const VALID_LAYOUTS  = ['standard','wide','minimal','sidebar'];
+    const VALID_THEMES   = ['light','dark'];
+    const VALID_PATTERNS = ['solid','diagonal_stripes','horizontal_stripes','vertical_stripes','grid','dots','checkerboard','zigzag','diamonds','honeycomb','crosshatch','waves','triangles','stars','mycelium'];
+    const VALID_SCALES   = ['small','medium','large'];
 
-    if (font_style   && !VALID_FONTS.includes(font_style))   return res.status(400).json({ error: 'Invalid font_style' });
-    if (layout       && !VALID_LAYOUTS.includes(layout))     return res.status(400).json({ error: 'Invalid layout' });
-    if (profile_theme && !VALID_THEMES.includes(profile_theme)) return res.status(400).json({ error: 'Invalid profile_theme' });
-    if (status_text  && status_text.length > 100) return res.status(400).json({ error: 'status_text max 100 characters' });
-    if (pinned_bulletin && pinned_bulletin.length > 500) return res.status(400).json({ error: 'pinned_bulletin max 500 characters' });
+    if (font_style    && !VALID_FONTS.includes(font_style))       return res.status(400).json({ error: 'Invalid font_style' });
+    if (layout        && !VALID_LAYOUTS.includes(layout))         return res.status(400).json({ error: 'Invalid layout' });
+    if (profile_theme && !VALID_THEMES.includes(profile_theme))   return res.status(400).json({ error: 'Invalid profile_theme' });
+    if (status_text   && status_text.length > 100)                return res.status(400).json({ error: 'status_text max 100 characters' });
+    if (pinned_bulletin && pinned_bulletin.length > 500)          return res.status(400).json({ error: 'pinned_bulletin max 500 characters' });
+    if (pattern_type  && !VALID_PATTERNS.includes(pattern_type))  return res.status(400).json({ error: 'Invalid pattern_type' });
+    if (pattern_scale && !VALID_SCALES.includes(pattern_scale))   return res.status(400).json({ error: 'Invalid pattern_scale' });
+    if (background_overlay_opacity != null) {
+      const v = parseFloat(background_overlay_opacity);
+      if (isNaN(v) || v < 0 || v > 0.9) return res.status(400).json({ error: 'background_overlay_opacity must be 0–0.9' });
+    }
+    if (pattern_opacity != null) {
+      const v = parseFloat(pattern_opacity);
+      if (isNaN(v) || v < 0 || v > 1) return res.status(400).json({ error: 'pattern_opacity must be 0–1' });
+    }
+
+    // background_photo_url: allow explicit null to clear it
+    const bgPhotoVal = Object.prototype.hasOwnProperty.call(req.body, 'background_photo_url')
+      ? (background_photo_url ?? null)
+      : undefined;
 
     const result = await pool.query(
       `UPDATE users SET
-         username          = COALESCE($1,  username),
-         bio               = COALESCE($2,  bio),
-         location          = COALESCE($3,  location),
-         website           = COALESCE($4,  website),
-         mood              = COALESCE($5,  mood),
-         mood_emoji        = COALESCE($6,  mood_emoji),
-         status_text       = COALESCE($7,  status_text),
-         music_url         = COALESCE($8,  music_url),
-         music_label       = COALESCE($9,  music_label),
-         background_color  = COALESCE($10, background_color),
-         background_gradient = COALESCE($11, background_gradient),
-         accent_color      = COALESCE($12, accent_color),
-         font_style        = COALESCE($13, font_style),
-         layout            = COALESCE($14, layout),
-         profile_theme     = COALESCE($15, profile_theme),
-         pinned_bulletin   = COALESCE($16, pinned_bulletin),
-         bulletin_updated_at = CASE WHEN $16 IS NOT NULL THEN NOW() ELSE bulletin_updated_at END,
-         interests         = COALESCE($17, interests),
-         updated_at        = NOW()
-       WHERE id = $18
+         username                  = COALESCE($1,  username),
+         bio                       = COALESCE($2,  bio),
+         location                  = COALESCE($3,  location),
+         website                   = COALESCE($4,  website),
+         mood                      = COALESCE($5,  mood),
+         mood_emoji                = COALESCE($6,  mood_emoji),
+         status_text               = COALESCE($7,  status_text),
+         music_url                 = COALESCE($8,  music_url),
+         music_label               = COALESCE($9,  music_label),
+         background_color          = COALESCE($10, background_color),
+         background_gradient       = COALESCE($11, background_gradient),
+         accent_color              = COALESCE($12, accent_color),
+         font_style                = COALESCE($13, font_style),
+         layout                    = COALESCE($14, layout),
+         profile_theme             = COALESCE($15, profile_theme),
+         pinned_bulletin           = COALESCE($16, pinned_bulletin),
+         bulletin_updated_at       = CASE WHEN $16 IS NOT NULL THEN NOW() ELSE bulletin_updated_at END,
+         interests                 = COALESCE($17, interests),
+         background_photo_url      = CASE WHEN $18::text IS NOT NULL THEN $18::text ELSE CASE WHEN $19 THEN NULL ELSE background_photo_url END END,
+         background_overlay_opacity= COALESCE($20, background_overlay_opacity),
+         profile_network_settings  = COALESCE($21, profile_network_settings),
+         profile_stickers          = COALESCE($22, profile_stickers),
+         pattern_type              = COALESCE($23, pattern_type),
+         pattern_color_primary     = COALESCE($24, pattern_color_primary),
+         pattern_color_secondary   = COALESCE($25, pattern_color_secondary),
+         pattern_scale             = COALESCE($26, pattern_scale),
+         pattern_opacity           = COALESCE($27, pattern_opacity),
+         updated_at                = NOW()
+       WHERE id = $28
        RETURNING id, username, bio, location, website, avatar_url,
                  mood, mood_emoji, status_text, music_url, music_label,
                  background_color, background_gradient, accent_color,
                  font_style, layout, banner_image_url, profile_theme,
-                 pinned_bulletin, bulletin_updated_at, interests`,
+                 pinned_bulletin, bulletin_updated_at, interests,
+                 background_photo_url, background_overlay_opacity,
+                 profile_network_settings, profile_stickers,
+                 pattern_type, pattern_color_primary, pattern_color_secondary,
+                 pattern_scale, pattern_opacity`,
       [
         username?.trim() ?? null,
         bio               ?? null,
@@ -211,6 +252,18 @@ router.patch('/customize', authenticate, async (req, res, next) => {
         profile_theme     ?? null,
         pinned_bulletin   ?? null,
         interests         ? (Array.isArray(interests) ? interests : []) : null,
+        // $18: new bg photo url (only if explicitly provided and non-null)
+        (bgPhotoVal !== undefined && bgPhotoVal !== null) ? bgPhotoVal : null,
+        // $19: explicit clear flag (true = set to NULL)
+        (bgPhotoVal === undefined) ? false : (bgPhotoVal === null),
+        background_overlay_opacity != null ? parseFloat(background_overlay_opacity) : null,
+        profile_network_settings  != null ? JSON.stringify(profile_network_settings)  : null,
+        profile_stickers          != null ? JSON.stringify(profile_stickers)           : null,
+        pattern_type              ?? null,
+        pattern_color_primary     ?? null,
+        pattern_color_secondary   ?? null,
+        pattern_scale             ?? null,
+        pattern_opacity           != null ? parseFloat(pattern_opacity) : null,
         req.user.id,
       ]
     );
@@ -281,6 +334,38 @@ router.post('/upload-banner', authenticate, upload.single('banner'), async (req,
       'UPDATE users SET banner_image_url = $1, updated_at = NOW() WHERE id = $2',
       [url, req.user.id]
     );
+    res.json({ url });
+  } catch (err) { next(err); }
+});
+
+// ── POST /api/profiles/upload-background ─────────────────────────────────────
+
+router.post('/upload-background', authenticate, upload.single('background'), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No image provided' });
+
+    const url = await uploadToR2(req.file.buffer, req.file.originalname, 'profile-backgrounds');
+
+    // Delete old background from R2 if it was an R2 URL
+    const existing = await pool.query('SELECT background_photo_url FROM users WHERE id = $1', [req.user.id]);
+    const oldUrl = existing.rows[0]?.background_photo_url;
+    if (oldUrl && !oldUrl.startsWith('/api/')) await deleteFromR2(oldUrl).catch(() => {});
+
+    await pool.query(
+      'UPDATE users SET background_photo_url = $1, updated_at = NOW() WHERE id = $2',
+      [url, req.user.id]
+    );
+    res.json({ url });
+  } catch (err) { next(err); }
+});
+
+// ── POST /api/profiles/upload-sticker ────────────────────────────────────────
+
+router.post('/upload-sticker', authenticate, upload.single('sticker'), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No image provided' });
+    if (req.file.size > 500 * 1024) return res.status(400).json({ error: 'Sticker must be under 500KB' });
+    const url = await uploadToR2(req.file.buffer, req.file.originalname, 'profile-stickers');
     res.json({ url });
   } catch (err) { next(err); }
 });

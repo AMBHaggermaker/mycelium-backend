@@ -45,6 +45,8 @@ app.use('/api/profiles',     require('./routes/profiles'));
 app.use('/api/activity',     require('./routes/activity'));
 app.use('/api/media',        require('./routes/media'));
 app.use('/api/businesses',   require('./routes/businesses'));
+app.use('/api/legislature',  require('./routes/legislature'));
+app.use('/api/feedback',     require('./routes/feedback'));
 
 app.get('/api/health', async (req, res) => {
   try {
