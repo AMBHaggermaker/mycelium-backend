@@ -204,16 +204,11 @@ router.post('/works/upload', authenticate, upload.single('file'), async (req, re
 
     // Broadcast to activity feed
     try {
-      const io = require('../lib/io').get();
-      const userRes = await pool.query('SELECT username FROM users WHERE id = $1', [req.user.id]);
-      if (io) {
-        io.emit('network_activity', {
-          type: 'maker_upload',
-          message: `New work by ${maker.maker_name}: ${title.trim()}`,
-          maker_username: userRes.rows[0]?.username,
-          work_id: result.rows[0].id,
-        });
-      }
+      const ioLib = require('../lib/io');
+      ioLib.networkActivity('maker_upload', {
+        message: `New work by ${maker.maker_name}: ${title.trim()}`,
+        work_id: result.rows[0].id,
+      });
     } catch { /* non-fatal */ }
 
     res.status(201).json(result.rows[0]);
