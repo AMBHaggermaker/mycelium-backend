@@ -19,10 +19,10 @@ const TIER_QUOTAS = {
 };
 
 const TIER_FILE_LIMITS = {
-  free:     { audio: 0, video: 0, image: 10 * 1024 * 1024 },
-  basic:    { audio: 50 * 1024 * 1024, video: 0, image: 50 * 1024 * 1024 },
-  standard: { audio: 200 * 1024 * 1024, video: 500 * 1024 * 1024, image: 50 * 1024 * 1024 },
-  pro:      { audio: 1024 * 1024 * 1024, video: 2 * 1024 * 1024 * 1024, image: 50 * 1024 * 1024 },
+  free:     { audio: 0,                        video: 0,                         image: 10  * 1024 * 1024 },
+  basic:    { audio: 50  * 1024 * 1024,        video: 0,                         image: 10  * 1024 * 1024 },
+  standard: { audio: 200 * 1024 * 1024,        video: 500  * 1024 * 1024,        image: 25  * 1024 * 1024 },
+  pro:      { audio: 1024 * 1024 * 1024,       video: 2    * 1024 * 1024 * 1024, image: 50  * 1024 * 1024 },
 };
 
 const upload = multer({
