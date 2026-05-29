@@ -25,6 +25,10 @@ require('./lib/io').set(io);
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
+
+// Stripe webhook MUST be registered before express.json() so raw body is preserved
+app.use('/api/stripe/webhook', require('./routes/stripe_webhook'));
+
 app.use(express.json());
 
 app.use('/api/auth',         require('./routes/auth'));
@@ -48,6 +52,8 @@ app.use('/api/businesses',   require('./routes/businesses'));
 app.use('/api/legislature',  require('./routes/legislature'));
 app.use('/api/feedback',     require('./routes/feedback'));
 app.use('/api/donations',    require('./routes/donations'));
+app.use('/api/prodev',       require('./routes/prodev'));
+app.use('/api/makers',       require('./routes/makers'));
 
 app.get('/api/health', async (req, res) => {
   try {
