@@ -54,6 +54,7 @@ app.use('/api/feedback',     require('./routes/feedback'));
 app.use('/api/donations',    require('./routes/donations'));
 app.use('/api/prodev',       require('./routes/prodev'));
 app.use('/api/makers',       require('./routes/makers'));
+app.use('/api/copyright',    require('./routes/copyright'));
 
 app.get('/api/health', async (req, res) => {
   try {

@@ -186,14 +186,21 @@ router.post('/works/upload', authenticate, upload.single('file'), async (req, re
     const isFreeVal  = is_free === 'true' || is_free === true;
     const priceVal   = isFreeVal ? 0 : parseFloat(price) || 0;
 
+    // Check title against known copyrighted works list
+    const knownMatch = await pool.query(
+      'SELECT id FROM known_copyrighted_titles WHERE lower(title) = lower($1)',
+      [title.trim()]
+    );
+    const autoFlagged = knownMatch.rows.length > 0;
+
     const result = await pool.query(
       `INSERT INTO maker_works
          (maker_id, title, description, category, work_type, r2_key, r2_url,
-          file_size_bytes, is_free, price, preview_r2_key, preview_r2_url, tags, license)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+          file_size_bytes, is_free, price, preview_r2_key, preview_r2_url, tags, license, copyright_flagged)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
        RETURNING *`,
       [maker.id, title.trim(), description || null, category, work_type, r2_key, r2Path,
-       file.size, isFreeVal, priceVal, preview_r2_key, preview_r2_url, parsedTags, license]
+       file.size, isFreeVal, priceVal, preview_r2_key, preview_r2_url, parsedTags, license, autoFlagged]
     );
 
     // Update storage used
@@ -202,16 +209,18 @@ router.post('/works/upload', authenticate, upload.single('file'), async (req, re
       [file.size, maker.id]
     );
 
-    // Broadcast to activity feed
-    try {
-      const ioLib = require('../lib/io');
-      ioLib.networkActivity('maker_upload', {
-        message: `New work by ${maker.maker_name}: ${title.trim()}`,
-        work_id: result.rows[0].id,
-      });
-    } catch { /* non-fatal */ }
+    // Broadcast to activity feed (only if not auto-flagged)
+    if (!autoFlagged) {
+      try {
+        const ioLib = require('../lib/io');
+        ioLib.networkActivity('maker_upload', {
+          message: `New work by ${maker.maker_name}: ${title.trim()}`,
+          work_id: result.rows[0].id,
+        });
+      } catch { /* non-fatal */ }
+    }
 
-    res.status(201).json(result.rows[0]);
+    res.status(201).json({ ...result.rows[0], copyright_flagged: autoFlagged });
   } catch (e) { next(e); }
 });
 
