@@ -22,12 +22,12 @@ const TIER_FILE_LIMITS = {
   free:     { audio: 0, video: 0, image: 10 * 1024 * 1024 },
   basic:    { audio: 50 * 1024 * 1024, video: 0, image: 50 * 1024 * 1024 },
   standard: { audio: 200 * 1024 * 1024, video: 500 * 1024 * 1024, image: 50 * 1024 * 1024 },
-  pro:      { audio: 1024 * 1024 * 1024, video: 1024 * 1024 * 1024, image: 50 * 1024 * 1024 },
+  pro:      { audio: 1024 * 1024 * 1024, video: 2 * 1024 * 1024 * 1024, image: 50 * 1024 * 1024 },
 };
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 1.1 * 1024 * 1024 * 1024 }, // 1.1 GB hard limit
+  limits: { fileSize: 2.2 * 1024 * 1024 * 1024 }, // 2.2 GB hard limit (covers Pro 2GB video)
 });
 
 function workTypeFromMime(mime) {
@@ -308,8 +308,8 @@ router.post('/subscribe', authenticate, async (req, res, next) => {
       payment_method_types: ['card'],
       mode: 'subscription',
       line_items: [{ price: priceId, quantity: 1 }],
-      success_url: `${APP_BASE_URL}/makers/guild-thanks?tier=${tier}`,
-      cancel_url:  `${APP_BASE_URL}/makers`,
+      success_url: `${APP_BASE_URL}/makers/upload`,
+      cancel_url:  `${APP_BASE_URL}/makers/upload`,
       customer_email: userResult.rows[0]?.email,
       metadata: { user_id: String(req.user.id), tier },
     });
