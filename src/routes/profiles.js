@@ -35,6 +35,24 @@ const upload = multer({
 
 // ── GET /api/profiles/:username ───────────────────────────────────────────────
 
+// GET /api/profiles/:username/card — lightweight card data for thumbnails
+router.get('/:username/card', async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT username, bio AS status_text, avatar_url, banner_image_url AS banner_url,
+              accent_color, background_color, mood_emoji, mood AS mood_label,
+              font_style, verified AS is_verified, founding_member,
+              COALESCE(status_text, pinned_bulletin) AS status_text
+       FROM users
+       WHERE lower(username) = lower($1) AND deleted_at IS NULL`,
+      [req.params.username]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'User not found' });
+    res.set('Cache-Control', 'public, max-age=60');
+    res.json(result.rows[0]);
+  } catch (err) { next(err); }
+});
+
 router.get('/:username', async (req, res, next) => {
   try {
     const userResult = await pool.query(

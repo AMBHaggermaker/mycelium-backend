@@ -409,7 +409,7 @@ router.patch('/:id/page-settings', authenticate, async (req, res, next) => {
     const allowed = ['accent', 'font', 'pattern_type', 'pattern_color_primary', 'pattern_color_secondary', 'pattern_scale', 'background_color'];
     const settings = Object.fromEntries(Object.entries(req.body).filter(([k]) => allowed.includes(k)));
     const result = await pool.query(
-      `UPDATE businesses SET page_settings = page_settings || $1::jsonb WHERE id = $2 RETURNING page_settings`,
+      `UPDATE businesses SET page_settings = COALESCE(page_settings, '{}') || $1::jsonb WHERE id = $2 RETURNING page_settings`,
       [JSON.stringify(settings), req.params.id]
     );
     res.json(result.rows[0]);

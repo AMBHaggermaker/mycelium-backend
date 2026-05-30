@@ -538,4 +538,44 @@ router.get('/seed', authenticate, requireRole('admin'), async (req, res, next) =
   }
 });
 
+// ── Bill Alert Subscriptions ──────────────────────────────────────────────────
+
+// GET /api/legislature/bill-alerts — get my subscriptions
+router.get('/bill-alerts', authenticate, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM bill_alert_subscriptions WHERE user_id = $1 ORDER BY created_at DESC`,
+      [req.user.id]
+    );
+    res.json(result.rows);
+  } catch (err) { next(err); }
+});
+
+// POST /api/legislature/bill-alerts — subscribe to a bill
+router.post('/bill-alerts', authenticate, async (req, res, next) => {
+  try {
+    const { bill_id, bill_title, bill_number } = req.body;
+    if (!bill_id) return res.status(400).json({ error: 'bill_id required' });
+    const result = await pool.query(
+      `INSERT INTO bill_alert_subscriptions (user_id, bill_id, bill_title, bill_number)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (user_id, bill_id) DO UPDATE SET bill_title = EXCLUDED.bill_title
+       RETURNING *`,
+      [req.user.id, bill_id, bill_title || null, bill_number || null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/legislature/bill-alerts/:billId — unsubscribe
+router.delete('/bill-alerts/:billId', authenticate, async (req, res, next) => {
+  try {
+    await pool.query(
+      `DELETE FROM bill_alert_subscriptions WHERE user_id = $1 AND bill_id = $2`,
+      [req.user.id, req.params.billId]
+    );
+    res.json({ unsubscribed: true });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

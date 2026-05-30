@@ -183,17 +183,18 @@ io.on('connection', async (socket) => {
     }
   });
 
-  socket.on('chat_message', async ({ room_slug, content }) => {
-    if (!content?.trim()) return;
+  socket.on('chat_message', async ({ room_slug, content, media_url, media_type, media_filename, media_size, media_duration }) => {
+    const text = content?.trim() || '';
+    if (!text && !media_url) return;
     try {
       const room = await pool.query('SELECT id FROM chat_rooms WHERE slug = $1', [room_slug]);
       if (!room.rows[0]) return;
 
       const result = await pool.query(
-        `INSERT INTO chat_messages (room_id, user_id, content)
-         VALUES ($1, $2, $3)
-         RETURNING id, room_id, user_id, content, created_at`,
-        [room.rows[0].id, user.id, content.trim()]
+        `INSERT INTO chat_messages (room_id, user_id, content, media_url, media_type, media_filename, media_size, media_duration)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING id, room_id, user_id, content, media_url, media_type, media_filename, media_size, media_duration, created_at`,
+        [room.rows[0].id, user.id, text || '[media]', media_url || null, media_type || null, media_filename || null, media_size || null, media_duration || null]
       );
       const msg = result.rows[0];
       lastActivity[room_slug] = msg.created_at.toISOString();

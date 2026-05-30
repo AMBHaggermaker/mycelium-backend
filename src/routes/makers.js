@@ -230,11 +230,150 @@ router.post('/works/upload', authenticate, upload.single('file'), async (req, re
   } catch (e) { next(e); }
 });
 
-// POST /api/makers/works/:id/play — increment play count
+// POST /api/makers/works/:id/play — record a play and increment count
 router.post('/works/:id/play', async (req, res, next) => {
   try {
+    const { duration_seconds, completed, session_id } = req.body;
     await pool.query('UPDATE maker_works SET play_count = play_count + 1 WHERE id = $1', [req.params.id]);
+
+    // Optional auth — record listener if logged in
+    let listenerId = null;
+    try {
+      const jwt = require('jsonwebtoken');
+      const hdr = req.headers.authorization?.split(' ')[1];
+      if (hdr) listenerId = jwt.verify(hdr, process.env.JWT_SECRET || 'mycelium_jwt_secret_change_in_production').id;
+    } catch { /* anonymous */ }
+
+    await pool.query(
+      `INSERT INTO maker_work_plays (work_id, listener_id, session_id, play_duration_seconds, completed)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [req.params.id, listenerId, session_id || null,
+       duration_seconds ? parseInt(duration_seconds) : 0,
+       completed === true]
+    );
     res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+
+// GET /api/makers/:username/metrics — maker's own metrics dashboard (owner + admin only)
+router.get('/:username/metrics', authenticate, async (req, res, next) => {
+  try {
+    const userResult = await pool.query(
+      'SELECT id, username FROM users WHERE lower(username) = lower($1) AND deleted_at IS NULL',
+      [req.params.username]
+    );
+    if (!userResult.rows[0]) return res.status(404).json({ error: 'User not found' });
+    const targetUser = userResult.rows[0];
+
+    const isOwner = req.user.id === targetUser.id;
+    const isAdmin = req.user.role === 'admin';
+    if (!isOwner && !isAdmin) return res.status(403).json({ error: 'Metrics are private' });
+
+    const makerResult = await pool.query(
+      'SELECT * FROM maker_profiles WHERE user_id = $1', [targetUser.id]
+    );
+    if (!makerResult.rows[0]) return res.status(404).json({ error: 'No maker profile' });
+    const maker = makerResult.rows[0];
+
+    const works = await pool.query(
+      'SELECT id, title, work_type, play_count, duration_seconds FROM maker_works WHERE maker_id = $1 ORDER BY created_at DESC',
+      [maker.id]
+    );
+    const workIds = works.rows.map(w => w.id);
+
+    if (workIds.length === 0) {
+      return res.json({
+        works: [],
+        totals: { total_plays: 0, unique_listeners: 0, avg_completion_rate: 0, total_downloads: 0, commission_requests: 0 },
+        time_series: [],
+        geographic: [],
+        most_played: null,
+        most_completed: null,
+      });
+    }
+
+    const [playsAgg, downloadsAgg, commissions, timeSeries, mostPlayed, mostCompleted] = await Promise.all([
+      // Per-work play stats
+      pool.query(
+        `SELECT
+           work_id,
+           COUNT(*)::int                                           AS total_plays,
+           COUNT(DISTINCT listener_id)::int                       AS unique_listeners,
+           COUNT(DISTINCT CASE WHEN listener_id IS NOT NULL AND
+             (SELECT COUNT(*) FROM maker_work_plays p2 WHERE p2.work_id = mwp.work_id AND p2.listener_id = mwp.listener_id) > 1
+             THEN listener_id END)::int                           AS return_listeners,
+           ROUND(100.0 * SUM(CASE WHEN completed THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*),0), 1) AS completion_rate
+         FROM maker_work_plays mwp
+         WHERE work_id = ANY($1)
+         GROUP BY work_id`,
+        [workIds]
+      ),
+      // Per-work download counts
+      pool.query(
+        `SELECT work_id, COUNT(*)::int AS download_count FROM maker_work_downloads WHERE work_id = ANY($1) GROUP BY work_id`,
+        [workIds]
+      ),
+      // Commission requests
+      pool.query(
+        `SELECT COUNT(*)::int AS total FROM maker_commissions WHERE maker_id = $1`, [maker.id]
+      ),
+      // 30-day time series
+      pool.query(
+        `SELECT DATE(created_at)::text AS date, COUNT(*)::int AS plays
+         FROM maker_work_plays WHERE work_id = ANY($1) AND created_at >= NOW() - INTERVAL '30 days'
+         GROUP BY DATE(created_at) ORDER BY date`,
+        [workIds]
+      ),
+      // Most played work
+      pool.query(
+        `SELECT w.id, w.title, COUNT(*)::int AS plays FROM maker_work_plays p JOIN maker_works w ON w.id = p.work_id
+         WHERE w.maker_id = $1 GROUP BY w.id, w.title ORDER BY plays DESC LIMIT 1`, [maker.id]
+      ),
+      // Most completed work
+      pool.query(
+        `SELECT w.id, w.title,
+           ROUND(100.0 * SUM(CASE WHEN p.completed THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*),0),1) AS completion_rate
+         FROM maker_work_plays p JOIN maker_works w ON w.id = p.work_id
+         WHERE w.maker_id = $1 AND COUNT(*) > 0
+         GROUP BY w.id, w.title HAVING COUNT(*) >= 5 ORDER BY completion_rate DESC LIMIT 1`, [maker.id]
+      ),
+    ]);
+
+    const playsMap     = Object.fromEntries(playsAgg.rows.map(r => [r.work_id, r]));
+    const downloadsMap = Object.fromEntries(downloadsAgg.rows.map(r => [r.work_id, r.download_count]));
+
+    const worksWithStats = works.rows.map(w => ({
+      ...w,
+      total_plays:       playsMap[w.id]?.total_plays       || 0,
+      unique_listeners:  playsMap[w.id]?.unique_listeners  || 0,
+      return_listeners:  playsMap[w.id]?.return_listeners  || 0,
+      completion_rate:   playsMap[w.id]?.completion_rate   || 0,
+      download_count:    downloadsMap[w.id]                || 0,
+    }));
+
+    const totalPlays    = worksWithStats.reduce((s, w) => s + w.total_plays, 0);
+    const totalDownloads= worksWithStats.reduce((s, w) => s + w.download_count, 0);
+    const uniqueSet     = await pool.query(
+      `SELECT COUNT(DISTINCT listener_id)::int AS total FROM maker_work_plays WHERE work_id = ANY($1) AND listener_id IS NOT NULL`,
+      [workIds]
+    );
+    const avgCompletion = worksWithStats.length
+      ? Math.round(worksWithStats.reduce((s, w) => s + Number(w.completion_rate), 0) / worksWithStats.length)
+      : 0;
+
+    res.json({
+      works: worksWithStats,
+      totals: {
+        total_plays:        totalPlays,
+        unique_listeners:   uniqueSet.rows[0]?.total || 0,
+        avg_completion_rate: avgCompletion,
+        total_downloads:    totalDownloads,
+        commission_requests: commissions.rows[0]?.total || 0,
+      },
+      time_series:   timeSeries.rows,
+      most_played:   mostPlayed.rows[0] || null,
+      most_completed:mostCompleted.rows[0] || null,
+    });
   } catch (e) { next(e); }
 });
 
@@ -306,7 +445,7 @@ router.patch('/:username/page-settings', authenticate, async (req, res, next) =>
     const allowed = ['accent', 'font', 'pattern_type', 'pattern_color_primary', 'pattern_color_secondary', 'pattern_scale', 'background_color'];
     const settings = Object.fromEntries(Object.entries(req.body).filter(([k]) => allowed.includes(k)));
     const result = await pool.query(
-      `UPDATE maker_profiles SET page_settings = page_settings || $1::jsonb WHERE user_id = $2 RETURNING page_settings`,
+      `UPDATE maker_profiles SET page_settings = COALESCE(page_settings, '{}') || $1::jsonb WHERE user_id = $2 RETURNING page_settings`,
       [JSON.stringify(settings), req.user.id]
     );
     res.json(result.rows[0]);

@@ -7,6 +7,7 @@ const jwt     = require('jsonwebtoken');
 const pool    = require('../db');
 const authenticate = require('../middleware/auth');
 const ioLib   = require('../lib/io');
+const { scanAndFlag } = require('../lib/childSafety');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'mycelium_jwt_secret_change_in_production';
 
@@ -143,10 +144,11 @@ router.get('/', async (req, res, next) => {
 // POST /api/posts
 router.post('/', authenticate, async (req, res, next) => {
   try {
-    const { type, title, description, circle_id, capacity, location, starts_at, ends_at,
-            tags, category, subcategory, is_urgent, expires_at, commerce_type, price, business_id } = req.body;
+    const { type, title, description, circle_id, capacity, location, location_lat, location_lng,
+            starts_at, ends_at, tags, category, subcategory, is_urgent, expires_at, commerce_type,
+            price, business_id, rich_content, mood_tag, collage_layout } = req.body;
     if (!type || !title) return res.status(400).json({ error: 'type and title are required' });
-    if (!['need', 'offer', 'event'].includes(type)) return res.status(400).json({ error: 'type must be need, offer, or event' });
+    if (!['need', 'offer', 'event', 'story_card'].includes(type)) return res.status(400).json({ error: 'type must be need, offer, event, or story_card' });
     if (type === 'event' && !starts_at) return res.status(400).json({ error: 'starts_at is required for events' });
     if (category && !VALID_CATEGORIES.has(category)) return res.status(400).json({ error: 'Invalid category' });
     const VALID_COMMERCE = new Set(['exchange', 'commerce', 'urgent']);
@@ -172,15 +174,21 @@ router.post('/', authenticate, async (req, res, next) => {
 
     const result = await pool.query(
       `INSERT INTO posts (type, title, description, user_id, circle_id, capacity, location,
+                          location_lat, location_lng,
                           starts_at, ends_at, tags, category, subcategory, is_urgent, auto_urgent,
-                          expires_at, commerce_type, price, business_id)
-       VALUES ($1::post_type, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                          expires_at, commerce_type, price, business_id,
+                          rich_content, mood_tag, collage_layout)
+       VALUES ($1::post_type, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
        RETURNING *, '[]'::json AS media`,
       [type, title.trim(), description || null, req.user.id, circle_id || null,
-       capacity || null, location || null, starts_at || null, ends_at || null,
+       capacity || null, location || null,
+       location_lat != null ? parseFloat(location_lat) : null,
+       location_lng != null ? parseFloat(location_lng) : null,
+       starts_at || null, ends_at || null,
        parsedTags, category || null, subcategory?.trim() || null,
        userUrgent, autoUrgent, expires_at || null, resolvedCommerceType,
-       price != null ? parseFloat(price) : null, business_id || null]
+       price != null ? parseFloat(price) : null, business_id || null,
+       rich_content || null, mood_tag || null, collage_layout || null]
     );
     const p = result.rows[0];
     ioLib.networkActivity('new_post', {
@@ -190,6 +198,11 @@ router.post('/', authenticate, async (req, res, next) => {
       location: p.location,
       username: req.user.username,
     }, (p.auto_urgent || p.is_urgent) ? 'urgent' : 'normal');
+
+    // Child safety AI scan — runs async, does not block response
+    const scanText = [title, description].filter(Boolean).join(' ');
+    scanAndFlag({ text: scanText, contentType: 'post', contentId: p.id, userId: req.user.id })
+      .catch(e => console.error('[childSafety] post scan error:', e.message));
 
     res.status(201).json(p);
   } catch (err) {
@@ -355,7 +368,8 @@ router.patch('/:id', authenticate, async (req, res, next) => {
     if (!existing.rows[0]) return res.status(404).json({ error: 'Post not found' });
     if (existing.rows[0].user_id !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
 
-    const { title, description, capacity, location, starts_at, ends_at, status,
+    const { title, description, capacity, location, location_lat, location_lng,
+            starts_at, ends_at, status,
             tags, category, subcategory, is_urgent, expires_at, commerce_type, price } = req.body;
     if (category !== undefined && category !== null && !VALID_CATEGORIES.has(category)) {
       return res.status(400).json({ error: 'Invalid category' });
@@ -375,21 +389,26 @@ router.patch('/:id', authenticate, async (req, res, next) => {
          description   = COALESCE($2, description),
          capacity      = COALESCE($3, capacity),
          location      = COALESCE($4, location),
-         starts_at     = COALESCE($5, starts_at),
-         ends_at       = COALESCE($6, ends_at),
-         status        = COALESCE($7::post_status, status),
-         tags          = COALESCE($8::text[], tags),
-         category      = COALESCE($9, category),
-         subcategory   = COALESCE($10, subcategory),
-         is_urgent     = COALESCE($11, is_urgent),
-         auto_urgent   = COALESCE($12, auto_urgent),
-         expires_at    = COALESCE($13, expires_at),
-         commerce_type = COALESCE($14, commerce_type),
-         price         = COALESCE($15, price),
+         location_lat  = COALESCE($5, location_lat),
+         location_lng  = COALESCE($6, location_lng),
+         starts_at     = COALESCE($7, starts_at),
+         ends_at       = COALESCE($8, ends_at),
+         status        = COALESCE($9::post_status, status),
+         tags          = COALESCE($10::text[], tags),
+         category      = COALESCE($11, category),
+         subcategory   = COALESCE($12, subcategory),
+         is_urgent     = COALESCE($13, is_urgent),
+         auto_urgent   = COALESCE($14, auto_urgent),
+         expires_at    = COALESCE($15, expires_at),
+         commerce_type = COALESCE($16, commerce_type),
+         price         = COALESCE($17, price),
          updated_at    = NOW()
-       WHERE id = $16
+       WHERE id = $18
        RETURNING *`,
-      [title, description, capacity, location, starts_at, ends_at, status,
+      [title, description, capacity, location,
+       location_lat != null ? parseFloat(location_lat) : null,
+       location_lng != null ? parseFloat(location_lng) : null,
+       starts_at, ends_at, status,
        parsedTags !== undefined ? parsedTags : null,
        category || null, subcategory?.trim() || null,
        userUrgent !== undefined ? userUrgent : null,
