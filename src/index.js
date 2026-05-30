@@ -55,6 +55,7 @@ app.use('/api/donations',    require('./routes/donations'));
 app.use('/api/prodev',       require('./routes/prodev'));
 app.use('/api/makers',       require('./routes/makers'));
 app.use('/api/copyright',    require('./routes/copyright'));
+app.use('/api/presence',     require('./routes/presence'));
 
 app.get('/api/health', async (req, res) => {
   try {
@@ -93,13 +94,40 @@ function getRoomCounts() {
   );
 }
 
-io.on('connection', (socket) => {
+io.on('connection', async (socket) => {
   const user = socket.user;
   const ioLib = require('./lib/io');
 
   // Join personal room for DM delivery
   socket.join(`user:${user.id}`);
-  ioLib.incConnected();
+
+  // Fetch user details for presence and register in global map
+  try {
+    const row = await pool.query(
+      'SELECT avatar_url, mood_emoji, presence_status, online_visibility FROM users WHERE id = $1',
+      [user.id]
+    );
+    const u = row.rows[0] || {};
+    ioLib.setUserPresence(user.id, socket.id, {
+      username:         user.username,
+      avatar_url:       u.avatar_url        || null,
+      mood_emoji:       u.mood_emoji        || null,
+      presence_status:  u.presence_status   || 'online',
+      online_visibility: u.online_visibility || 'public',
+    });
+  } catch { /* non-fatal — presence degrades gracefully */ }
+
+  socket.on('set_presence_status', async ({ status }) => {
+    if (!['online', 'busy', 'away', 'offline'].includes(status)) return;
+    try {
+      await pool.query('UPDATE users SET presence_status = $1 WHERE id = $2', [status, user.id]);
+      ioLib.updatePresenceStatus(user.id, status);
+    } catch { /* non-fatal */ }
+  });
+
+  socket.on('activity_ping', () => {
+    ioLib.updateLastActivity(user.id);
+  });
 
   socket.on('join_room', (slug) => {
     socket.join(`room:${slug}`);
@@ -183,7 +211,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    ioLib.decConnected();
+    ioLib.removeSocket(user.id, socket.id);
     for (const [slug, presenceMap] of Object.entries(roomPresence)) {
       if (presenceMap.has(socket.id)) {
         presenceMap.delete(socket.id);
