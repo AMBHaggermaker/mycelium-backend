@@ -398,6 +398,45 @@ router.delete('/:id/recommendations/:msgId', authenticate, async (req, res, next
   } catch (err) { next(err); }
 });
 
+// PATCH /api/businesses/:id/page-settings — save business page customization
+router.patch('/:id/page-settings', authenticate, async (req, res, next) => {
+  try {
+    const biz = await pool.query('SELECT owner_id FROM businesses WHERE id = $1', [req.params.id]);
+    if (!biz.rows[0]) return res.status(404).json({ error: 'Business not found' });
+    if (biz.rows[0].owner_id !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const allowed = ['accent', 'font', 'pattern_type', 'pattern_color_primary', 'pattern_color_secondary', 'pattern_scale', 'background_color'];
+    const settings = Object.fromEntries(Object.entries(req.body).filter(([k]) => allowed.includes(k)));
+    const result = await pool.query(
+      `UPDATE businesses SET page_settings = page_settings || $1::jsonb WHERE id = $2 RETURNING page_settings`,
+      [JSON.stringify(settings), req.params.id]
+    );
+    res.json(result.rows[0]);
+  } catch (err) { next(err); }
+});
+
+// POST /api/businesses/:id/banner — upload business page banner
+const bizBannerUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => cb(null, ['image/jpeg','image/png','image/webp'].includes(file.mimetype)) });
+
+router.post('/:id/banner', authenticate, bizBannerUpload.single('banner'), async (req, res, next) => {
+  try {
+    const biz = await pool.query('SELECT owner_id FROM businesses WHERE id = $1', [req.params.id]);
+    if (!biz.rows[0]) return res.status(404).json({ error: 'Business not found' });
+    if (biz.rows[0].owner_id !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'No file' });
+
+    const folder = `businesses/${req.params.id}/banner`;
+    const r2Url = await uploadToR2(file.buffer, 'banner.jpg', folder);
+    await pool.query('UPDATE businesses SET banner_url = $1 WHERE id = $2', [r2Url, req.params.id]);
+    res.json({ banner_url: r2Url });
+  } catch (err) { next(err); }
+});
+
 // GET /api/businesses/owner/:userId — businesses owned by a user
 router.get('/owner/:userId', async (req, res, next) => {
   try {

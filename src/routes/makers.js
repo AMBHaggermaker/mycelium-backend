@@ -287,6 +287,49 @@ router.post('/profile', authenticate, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// PATCH /api/makers/:username/page-settings — save maker page customization
+router.patch('/:username/page-settings', authenticate, async (req, res, next) => {
+  try {
+    const userRes = await pool.query(
+      'SELECT id FROM users WHERE lower(username) = lower($1) AND deleted_at IS NULL',
+      [req.params.username]
+    );
+    if (!userRes.rows[0]) return res.status(404).json({ error: 'User not found' });
+    if (userRes.rows[0].id !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
+
+    const allowed = ['accent', 'font', 'pattern_type', 'pattern_color_primary', 'pattern_color_secondary', 'pattern_scale', 'background_color'];
+    const settings = Object.fromEntries(Object.entries(req.body).filter(([k]) => allowed.includes(k)));
+    const result = await pool.query(
+      `UPDATE maker_profiles SET page_settings = page_settings || $1::jsonb WHERE user_id = $2 RETURNING page_settings`,
+      [JSON.stringify(settings), req.user.id]
+    );
+    res.json(result.rows[0]);
+  } catch (e) { next(e); }
+});
+
+// POST /api/makers/:username/banner — upload maker page banner image
+const bannerUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => cb(null, ['image/jpeg','image/png','image/webp'].includes(file.mimetype)) });
+
+router.post('/:username/banner', authenticate, bannerUpload.single('banner'), async (req, res, next) => {
+  try {
+    const userRes = await pool.query(
+      'SELECT id FROM users WHERE lower(username) = lower($1) AND deleted_at IS NULL',
+      [req.params.username]
+    );
+    if (!userRes.rows[0]) return res.status(404).json({ error: 'User not found' });
+    if (userRes.rows[0].id !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
+
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'No file' });
+
+    const folder = `makers/${req.user.id}/banner`;
+    const r2Url = await uploadToR2(file.buffer, 'banner.jpg', folder);
+    await pool.query('UPDATE maker_profiles SET banner_url = $1 WHERE user_id = $2', [r2Url, req.user.id]);
+    res.json({ banner_url: r2Url });
+  } catch (e) { next(e); }
+});
+
 // POST /api/makers/subscribe — create Stripe subscription for a tier
 router.post('/subscribe', authenticate, async (req, res, next) => {
   try {
