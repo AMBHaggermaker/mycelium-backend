@@ -275,9 +275,39 @@ router.patch('/users/:userId/founding-member', requireRole('admin'), async (req,
       return res.status(403).json({ error: 'The founding account founding member status cannot be revoked' });
     }
 
+    // Granting founding member also sets verified = true
     const result = await pool.query(
-      'UPDATE users SET founding_member = $1 WHERE id = $2 RETURNING id, username, founding_member',
+      `UPDATE users
+         SET founding_member = $1,
+             verified = CASE WHEN $1 = true THEN true ELSE verified END
+       WHERE id = $2
+       RETURNING id, username, founding_member, verified`,
       [grant, req.params.userId]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/admin/users/:userId/verify  — set or revoke verified status
+router.patch('/users/:userId/verify', requireRole('admin'), async (req, res, next) => {
+  try {
+    const { verified } = req.body;
+    if (typeof verified !== 'boolean') {
+      return res.status(400).json({ error: 'verified must be true or false' });
+    }
+
+    const target = await pool.query('SELECT username FROM users WHERE id = $1', [req.params.userId]);
+    if (!target.rows[0]) return res.status(404).json({ error: 'User not found' });
+
+    if (!verified && target.rows[0].username === 'AMBHaggermaker') {
+      return res.status(403).json({ error: 'The AMBHaggermaker account cannot be unverified' });
+    }
+
+    const result = await pool.query(
+      'UPDATE users SET verified = $1 WHERE id = $2 RETURNING id, username, verified',
+      [verified, req.params.userId]
     );
     res.json(result.rows[0]);
   } catch (err) {
