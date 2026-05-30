@@ -506,4 +506,34 @@ router.patch('/users/:userId/covenant-agreed', requireRole('admin'), async (req,
   }
 });
 
+// POST /api/admin/users/:userId/maker-access — grant complimentary maker access
+router.post('/users/:userId/maker-access', requireRole('admin'), async (req, res, next) => {
+  try {
+    const { tier } = req.body;
+    if (!['basic', 'standard', 'pro'].includes(tier)) {
+      return res.status(400).json({ error: 'tier must be basic, standard, or pro' });
+    }
+
+    const target = await pool.query(
+      'SELECT id, username FROM users WHERE id = $1 AND deleted_at IS NULL',
+      [req.params.userId]
+    );
+    if (!target.rows[0]) return res.status(404).json({ error: 'User not found' });
+
+    const result = await pool.query(
+      `INSERT INTO maker_profiles (user_id, maker_name, storage_tier, storage_used_bytes)
+       VALUES ($1, $2, $3, 0)
+       ON CONFLICT (user_id) DO UPDATE SET
+         storage_tier           = $3,
+         stripe_subscription_id = NULL,
+         tier_expires_at        = NULL
+       RETURNING *`,
+      [req.params.userId, target.rows[0].username, tier]
+    );
+    res.json({ ok: true, maker_profile: result.rows[0] });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;

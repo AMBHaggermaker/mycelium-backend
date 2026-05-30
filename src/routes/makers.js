@@ -11,6 +11,8 @@ const Stripe       = require('stripe');
 const stripe = process.env.STRIPE_SECRET_KEY ? Stripe(process.env.STRIPE_SECRET_KEY) : null;
 const APP_BASE_URL = process.env.APP_BASE_URL || 'https://mycelium.unprecedentedtimes.org';
 
+const FOUNDER_USERNAME = 'AMBHaggermaker';
+
 const TIER_QUOTAS = {
   free:     100  * 1024 * 1024,
   basic:    1024 * 1024 * 1024,
@@ -150,22 +152,26 @@ router.get('/:username', async (req, res, next) => {
 // POST /api/makers/works/upload — upload a work to R2
 router.post('/works/upload', authenticate, upload.single('file'), async (req, res, next) => {
   try {
+    const isFounder = req.user.username === FOUNDER_USERNAME;
     const maker = await getMakerProfile(req.user.id);
     if (!maker) return res.status(403).json({ error: 'You need a maker profile to upload' });
-    if (maker.storage_tier === 'free') return res.status(403).json({ error: 'Upgrade to a paid tier to upload works' });
+
+    // Founder gets permanent Pro access regardless of subscription state
+    const effectiveTier = isFounder ? 'pro' : maker.storage_tier;
+    if (effectiveTier === 'free') return res.status(403).json({ error: 'Upgrade to a paid tier to upload works' });
 
     const file = req.file;
     if (!file) return res.status(400).json({ error: 'No file provided' });
 
     const work_type = workTypeFromMime(file.mimetype);
-    const tierLimits = TIER_FILE_LIMITS[maker.storage_tier] || TIER_FILE_LIMITS.free;
+    const tierLimits = TIER_FILE_LIMITS[effectiveTier] || TIER_FILE_LIMITS.free;
     const typeLimit  = tierLimits[work_type] ?? tierLimits.image;
 
     if (typeLimit === 0) return res.status(403).json({ error: `Your tier does not support ${work_type} uploads` });
     if (file.size > typeLimit) return res.status(400).json({ error: `File exceeds ${Math.round(typeLimit / 1024 / 1024)}MB limit for your tier` });
 
-    const quota = TIER_QUOTAS[maker.storage_tier] || TIER_QUOTAS.free;
-    if (maker.storage_used_bytes + file.size > quota) {
+    const quota = TIER_QUOTAS[effectiveTier] || TIER_QUOTAS.free;
+    if (!isFounder && maker.storage_used_bytes + file.size > quota) {
       return res.status(400).json({ error: 'Storage quota exceeded. Upgrade your tier or remove existing works.' });
     }
 
