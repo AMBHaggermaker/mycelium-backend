@@ -536,4 +536,180 @@ router.post('/users/:userId/maker-access', requireRole('admin'), async (req, res
   }
 });
 
+// ── Child Safety Queue (admin only) ─────────────────────────────────────────
+
+// GET /api/admin/child-safety/flags
+router.get('/child-safety/flags', requireRole('admin'), async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT sf.*, u.username AS flagged_username
+       FROM safety_flags sf
+       LEFT JOIN users u ON u.id = sf.user_id
+       WHERE sf.status = 'pending'
+       ORDER BY sf.created_at DESC`
+    );
+    res.json(result.rows);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/child-safety/csam-reports
+router.get('/child-safety/csam-reports', requireRole('admin'), async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT cr.*, u.username AS reporter_username
+       FROM csam_reports cr
+       LEFT JOIN users u ON u.id = cr.user_id
+       ORDER BY cr.created_at DESC`
+    );
+    res.json(result.rows);
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/child-safety/flags/:id — review a flag
+router.patch('/child-safety/flags/:id', requireRole('admin'), async (req, res, next) => {
+  try {
+    const { status, review_note } = req.body;
+    if (!['reviewed','dismissed','actioned'].includes(status)) {
+      return res.status(400).json({ error: 'status must be reviewed, dismissed, or actioned' });
+    }
+    const result = await pool.query(
+      `UPDATE safety_flags
+       SET status = $1, review_note = $2, reviewed_by = $3, reviewed_at = NOW()
+       WHERE id = $4 RETURNING *`,
+      [status, review_note || null, req.user.id, req.params.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Flag not found' });
+    res.json(result.rows[0]);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/child-safety/ncmec-report/:reportId — generate NCMEC report data
+router.get('/child-safety/ncmec-report/:reportId', requireRole('admin'), async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT cr.*, u.username, u.email, u.created_at AS account_created
+       FROM csam_reports cr LEFT JOIN users u ON u.id = cr.user_id
+       WHERE cr.id = $1`,
+      [req.params.reportId]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Report not found' });
+    const r = result.rows[0];
+    // Structured for manual NCMEC CyberTipline submission at https://www.missingkids.org/gethelpnow/cybertipline
+    res.json({
+      report: r,
+      ncmec_submission_url: 'https://www.missingkids.org/gethelpnow/cybertipline',
+      fields_for_submission: {
+        esp_name: 'Mycelium (unprecedentedtimes.org)',
+        incident_type: 'Apparent Child Sexual Abuse Material (CSAM)',
+        file_hash_sha256: r.file_hash,
+        upload_timestamp: r.upload_timestamp,
+        ip_address: r.ip_address,
+        account_screen_name: r.username || 'anonymous',
+        account_email: r.email || 'unknown',
+        platform_report_id: r.id,
+        action_taken: r.action_taken,
+      },
+      note: 'API integration pending NCMEC_API_KEY. Submit manually via the CyberTipline URL above until API is configured.',
+    });
+  } catch (err) { next(err); }
+});
+
+// ── Private Content Audit Log (founder only) ─────────────────────────────────
+
+const FOUNDER_USERNAME = 'AMBHaggermaker';
+
+// POST /api/admin/audit-log — record an admin access to private content
+router.post('/audit-log', requireRole('admin'), async (req, res, next) => {
+  try {
+    const { content_type, content_id, reason } = req.body;
+    if (!content_type || !content_id || !reason?.trim()) {
+      return res.status(400).json({ error: 'content_type, content_id, and reason are required' });
+    }
+    const result = await pool.query(
+      `INSERT INTO private_content_access_log (admin_id, content_type, content_id, reason)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [req.user.id, content_type, String(content_id), reason.trim()]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/audit-log — founder-only view of all admin access logs
+router.get('/audit-log', requireRole('admin'), async (req, res, next) => {
+  try {
+    if (req.user.username !== FOUNDER_USERNAME) {
+      return res.status(403).json({ error: 'Audit log is only accessible to the platform founder' });
+    }
+    const result = await pool.query(
+      `SELECT pal.*, u.username AS admin_username
+       FROM private_content_access_log pal
+       JOIN users u ON u.id = pal.admin_id
+       ORDER BY pal.accessed_at DESC
+       LIMIT 500`
+    );
+    res.json(result.rows);
+  } catch (err) { next(err); }
+});
+
+// ── Moderation action log ────────────────────────────────────────────────────
+
+// POST /api/admin/moderation-log — log a mod action (deletion etc.)
+router.post('/moderation-log', requireRole('moderator', 'admin'), async (req, res, next) => {
+  try {
+    const { action, target_type, target_id, reason } = req.body;
+    if (!action || !target_type || !target_id) {
+      return res.status(400).json({ error: 'action, target_type, target_id required' });
+    }
+    await pool.query(
+      `INSERT INTO moderation_action_log (moderator_id, action, target_type, target_id, reason)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [req.user.id, action, target_type, String(target_id), reason || null]
+    );
+    res.status(201).json({ logged: true });
+  } catch (err) { next(err); }
+});
+
+// ── XRP Donations ────────────────────────────────────────────────────────────
+
+// GET /api/admin/donations/xrp
+router.get('/donations/xrp', requireRole('admin'), async (req, res, next) => {
+  try {
+    const { status } = req.query;
+    let query = 'SELECT * FROM xrp_donations';
+    const params = [];
+    if (status) { query += ' WHERE status = $1'; params.push(status); }
+    query += ' ORDER BY created_at DESC';
+    const rows = await pool.query(query, params);
+
+    // Summary totals (always across all rows)
+    const totals = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE status = 'pending')       AS pending_count,
+        COUNT(*) FILTER (WHERE status = 'confirmed')     AS confirmed_count,
+        COALESCE(SUM(declared_amount_xrp) FILTER (WHERE status = 'confirmed'), 0) AS confirmed_xrp
+      FROM xrp_donations
+    `);
+
+    res.json({ donations: rows.rows, totals: totals.rows[0] });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/donations/xrp/:id
+router.patch('/donations/xrp/:id', requireRole('admin'), async (req, res, next) => {
+  try {
+    const { status, admin_notes, ledger_transaction_ref } = req.body;
+    const result = await pool.query(
+      `UPDATE xrp_donations SET
+         status                 = COALESCE($1, status),
+         admin_notes            = COALESCE($2, admin_notes),
+         ledger_transaction_ref = COALESCE($3, ledger_transaction_ref),
+         confirmed_at           = CASE WHEN $1 = 'confirmed' AND confirmed_at IS NULL THEN NOW() ELSE confirmed_at END
+       WHERE id = $4 RETURNING *`,
+      [status || null, admin_notes !== undefined ? admin_notes : null, ledger_transaction_ref !== undefined ? ledger_transaction_ref : null, req.params.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Declaration not found' });
+    res.json(result.rows[0]);
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
