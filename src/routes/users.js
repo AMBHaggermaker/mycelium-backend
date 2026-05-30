@@ -291,4 +291,34 @@ router.patch('/me/covenant', authenticate, async (req, res, next) => {
   }
 });
 
+// GET /api/users/me/theme — fetch theme preferences for the logged-in user
+router.get('/me/theme', authenticate, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      'SELECT theme_preferences FROM users WHERE id = $1',
+      [req.user.id]
+    );
+    res.json(result.rows[0]?.theme_preferences || {});
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/users/me/theme — save theme preferences for the logged-in user
+router.patch('/me/theme', authenticate, async (req, res, next) => {
+  try {
+    const allowed = ['base', 'accent', 'font', 'starfield', 'animation'];
+    const prefs = {};
+    for (const k of allowed) {
+      if (req.body[k] !== undefined) prefs[k] = req.body[k];
+    }
+    const result = await pool.query(
+      `UPDATE users
+       SET theme_preferences = theme_preferences || $1::jsonb
+       WHERE id = $2
+       RETURNING theme_preferences`,
+      [JSON.stringify(prefs), req.user.id]
+    );
+    res.json(result.rows[0].theme_preferences);
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
