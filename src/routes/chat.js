@@ -2,7 +2,6 @@ const express = require('express');
 const pool = require('../db');
 const authenticate = require('../middleware/auth');
 const PDFDocument = require('pdfkit');
-const https = require('https');
 const multer = require('multer');
 const { uploadToR2 } = require('../lib/r2');
 const { checkUploadedFile } = require('../lib/childSafety');
@@ -149,40 +148,6 @@ router.post('/rooms/:slug/upload', authenticate, chatUpload.single('file'), asyn
   } catch (err) { next(err); }
 });
 
-// GET /api/chat/gifs?q= — proxy Tenor GIF search
-router.get('/gifs', authenticate, async (req, res, next) => {
-  try {
-    const q = req.query.q?.trim() || '';
-    const apiKey = process.env.TENOR_API_KEY;
-    if (!apiKey || apiKey === 'REPLACE_WITH_TENOR_API_KEY') {
-      return res.json([]);
-    }
-    const endpoint = q
-      ? `https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(q)}&key=${apiKey}&limit=20&media_filter=tinygif`
-      : `https://tenor.googleapis.com/v2/featured?key=${apiKey}&limit=20&media_filter=tinygif`;
-
-    const data = await new Promise((resolve, reject) => {
-      https.get(endpoint, (r) => {
-        let body = '';
-        r.on('data', c => body += c);
-        r.on('end', () => {
-          try { resolve(JSON.parse(body)); } catch { reject(new Error('Tenor parse error')); }
-        });
-      }).on('error', reject);
-    });
-
-    const results = (data.results || []).map(g => {
-      const tinygif = g.media_formats?.tinygif || g.media_formats?.gif;
-      return {
-        url: tinygif?.url || '',
-        preview: tinygif?.url || '',
-        title: g.title || g.content_description || '',
-      };
-    }).filter(g => g.url);
-
-    res.json(results);
-  } catch (err) { next(err); }
-});
 
 // POST /api/chat/rooms/:slug/export-pdf
 router.post('/rooms/:slug/export-pdf', authenticate, async (req, res, next) => {
